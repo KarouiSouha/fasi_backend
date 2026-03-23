@@ -16,10 +16,18 @@ import logging
 from datetime import date
 
 from django.core.cache import cache
+from django.db import transaction
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from .models import AIConversation, AIConversationMessage
+from .serializers import (
+    AIConversationCreateSerializer,
+    AIConversationMessageSerializer,
+    AIConversationSerializer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +45,75 @@ def _require_company(request):
             status=status.HTTP_403_FORBIDDEN,
         )
     return company, None
+
+
+def _conversation_title_from_text(text: str) -> str:
+    cleaned = (text or "").strip().replace("\n", " ")
+    if not cleaned:
+        return "Decision Advisor session"
+    return cleaned[:120]
+
+
+class AIConversationListCreateView(APIView):
+    """GET/POST conversation sessions for current user/company."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        company, err = _require_company(request)
+        if err:
+            return err
+
+        conversations = (
+            AIConversation.objects
+            .filter(company=company, user=request.user)
+            .order_by("-updated_at")[:50]
+        )
+        data = AIConversationSerializer(conversations, many=True).data
+        return Response({"count": len(data), "conversations": data})
+
+    def post(self, request):
+        company, err = _require_company(request)
+        if err:
+            return err
+
+        serializer = AIConversationCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        conversation = AIConversation.objects.create(
+            company=company,
+            user=request.user,
+            title=(serializer.validated_data.get("title") or "").strip()[:255],
+        )
+        return Response(AIConversationSerializer(conversation).data, status=status.HTTP_201_CREATED)
+
+
+class AIConversationMessagesView(APIView):
+    """GET message history for one conversation."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, conversation_id):
+        company, err = _require_company(request)
+        if err:
+            return err
+
+        conversation = (
+            AIConversation.objects
+            .filter(id=conversation_id, company=company, user=request.user)
+            .first()
+        )
+        if not conversation:
+            return Response({"error": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        messages = conversation.messages.order_by("created_at")
+        data = AIConversationMessageSerializer(messages, many=True).data
+        return Response({
+            "conversation": AIConversationSerializer(conversation).data,
+            "count": len(data),
+            "messages": data,
+        })
 
 
 # ── System prompt ─────────────────────────────────────────────────────────────
@@ -317,15 +394,17 @@ class AIChatView(APIView):
     """
     POST /api/ai-insights/chat/
 
-    Request body:
+        Request body:
     {
       "messages": [{"role": "user"|"assistant", "content": "..."}],
+            "conversation_id": "<uuid optional>",
       "mode": "general" | "decision" | "action_plan",
       "language": "en" | "fr" | "ar"
     }
 
     Response:
     {
+            "conversation_id": "<uuid>",
       "answer": "...",
       "decision_needed": true|false,
       "decision_card": {...} | null,
@@ -347,12 +426,23 @@ class AIChatView(APIView):
             return err
 
         messages = request.data.get("messages", [])
+        conversation_id = request.data.get("conversation_id")
         language = request.data.get("language", "English")
+
+        conversation = None
+        if conversation_id:
+            conversation = (
+                AIConversation.objects
+                .filter(id=conversation_id, company=company, user=request.user)
+                .first()
+            )
+            if not conversation:
+                return Response({"error": "Conversation not found."}, status=404)
 
         if not messages:
             return Response({"error": "messages is required."}, status=400)
 
-        # Trim history
+        # Trim incoming history
         messages = messages[-self.MAX_HISTORY:]
 
         # Build live context
@@ -369,7 +459,7 @@ class AIChatView(APIView):
             language=language,
         )
 
-        # Convert to API format
+        # Convert incoming payload to API format
         api_messages = []
         for m in messages:
             role    = m.get("role", "user")
@@ -381,17 +471,85 @@ class AIChatView(APIView):
         if not api_messages:
             return Response({"error": "No valid messages."}, status=400)
 
+        latest_user_message = next(
+            (m["content"] for m in reversed(api_messages) if m["role"] == "user"),
+            "",
+        )
+        if not latest_user_message:
+            return Response({"error": "A user message is required."}, status=400)
+
+        # When conversation exists, use DB history to keep continuity server-side.
+        if conversation:
+            persisted_history = list(
+                conversation.messages.order_by("created_at").values("role", "content")
+            )
+            persisted_history = persisted_history[-(self.MAX_HISTORY - 1):]
+            api_messages = [
+                {"role": m["role"], "content": m["content"]}
+                for m in persisted_history
+                if m["role"] in ("user", "assistant") and m["content"]
+            ]
+            api_messages.append({"role": "user", "content": latest_user_message})
+
+        if not conversation:
+            conversation = AIConversation.objects.create(
+                company=company,
+                user=request.user,
+                title=_conversation_title_from_text(latest_user_message),
+            )
+
+        user_message_obj = AIConversationMessage.objects.create(
+            conversation=conversation,
+            role=AIConversationMessage.Role.USER,
+            content=latest_user_message,
+            metadata={},
+        )
+
         # Call AI
         try:
             reply = self._call_ai(system_prompt, api_messages, company)
             if reply:
-                return Response({**reply, "fallback": False})
+                with transaction.atomic():
+                    AIConversationMessage.objects.create(
+                        conversation=conversation,
+                        role=AIConversationMessage.Role.ASSISTANT,
+                        content=reply.get("answer", ""),
+                        metadata={
+                            "decision_needed": bool(reply.get("decision_needed", False)),
+                            "decision_card": reply.get("decision_card"),
+                            "suggested_followups": reply.get("suggested_followups", []),
+                            "urgency": reply.get("urgency", "medium"),
+                            "topic": reply.get("topic", "general"),
+                            "fallback": False,
+                            "reply_to": str(user_message_obj.id),
+                        },
+                    )
+                    conversation.save()
+
+                return Response({"conversation_id": str(conversation.id), **reply, "fallback": False})
         except Exception as exc:
             logger.error("[AIChatView] AI call failed for company=%s: %s", company.id, exc)
 
         # Fallback
         fallback = self._build_fallback(api_messages[-1].get("content", ""), context)
-        return Response({**fallback, "fallback": True})
+        with transaction.atomic():
+            AIConversationMessage.objects.create(
+                conversation=conversation,
+                role=AIConversationMessage.Role.ASSISTANT,
+                content=fallback.get("answer", ""),
+                metadata={
+                    "decision_needed": bool(fallback.get("decision_needed", False)),
+                    "decision_card": fallback.get("decision_card"),
+                    "suggested_followups": fallback.get("suggested_followups", []),
+                    "urgency": fallback.get("urgency", "medium"),
+                    "topic": fallback.get("topic", "general"),
+                    "fallback": True,
+                    "reply_to": str(user_message_obj.id),
+                },
+            )
+            conversation.save()
+
+        return Response({"conversation_id": str(conversation.id), **fallback, "fallback": True})
 
     def _call_ai(self, system_prompt: str, messages: list, company) -> dict | None:
         """

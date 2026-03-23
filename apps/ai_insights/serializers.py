@@ -8,7 +8,7 @@ The frontend TypeScript interfaces must mirror these schemas.
 """
 
 from rest_framework import serializers
-from .models import AlertResolution
+from .models import AlertResolution, AIConversation, AIConversationMessage
 
 
 # ── Alert Resolution ──────────────────────────────────────────────────────────
@@ -46,6 +46,28 @@ class AlertResolveInputSerializer(serializers.Serializer):
         max_length=1000,
         default="",
     )
+
+
+# ── Conversations ─────────────────────────────────────────────────────────────
+
+class AIConversationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AIConversation
+        fields = ["id", "title", "created_at", "updated_at"]
+        read_only_fields = fields
+
+
+class AIConversationCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AIConversation
+        fields = ["title"]
+
+
+class AIConversationMessageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AIConversationMessage
+        fields = ["id", "role", "content", "metadata", "created_at"]
+        read_only_fields = fields
 
 
 # ── AI Explanation ────────────────────────────────────────────────────────────

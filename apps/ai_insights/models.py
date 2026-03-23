@@ -130,3 +130,67 @@ class AIUsageLog(models.Model):
 
     def __str__(self):
         return f"[{self.analyzer}] {self.tokens_used} tokens — ${self.cost_usd}"
+
+
+class AIConversation(models.Model):
+    """Persistent chat session for the Decision Advisor."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    company = models.ForeignKey(
+        "companies.Company",
+        on_delete=models.CASCADE,
+        related_name="ai_conversations",
+        verbose_name="Company",
+    )
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="ai_conversations",
+        verbose_name="User",
+    )
+
+    title = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Created at")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Updated at", db_index=True)
+
+    class Meta:
+        db_table = "ai_conversation"
+        verbose_name = "AI Conversation"
+        verbose_name_plural = "AI Conversations"
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"Conversation {self.id} ({self.user.email})"
+
+
+class AIConversationMessage(models.Model):
+    """One message in a persistent Decision Advisor conversation."""
+
+    class Role(models.TextChoices):
+        USER = "user", "User"
+        ASSISTANT = "assistant", "Assistant"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    conversation = models.ForeignKey(
+        AIConversation,
+        on_delete=models.CASCADE,
+        related_name="messages",
+        verbose_name="Conversation",
+    )
+
+    role = models.CharField(max_length=20, choices=Role.choices)
+    content = models.TextField()
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "ai_conversation_message"
+        verbose_name = "AI Conversation Message"
+        verbose_name_plural = "AI Conversation Messages"
+        ordering = ["created_at"]
+
+    def __str__(self):
+        return f"{self.role} @ {self.created_at.isoformat()}"

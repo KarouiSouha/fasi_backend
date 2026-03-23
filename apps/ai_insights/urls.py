@@ -19,7 +19,7 @@ from .views import (
     CriticalDetectionView,
     AIUsageView,    
 )
-from .chat_views import AIChatView 
+from .chat_views import AIChatView, AIConversationListCreateView, AIConversationMessagesView
 app_name = "ai_insights"
 
 urlpatterns = [
@@ -37,6 +37,8 @@ urlpatterns = [
     path("predict/",                       PredictionView.as_view(),        name="predict"),
     path("critical/",                      CriticalDetectionView.as_view(), name="critical-detection"),
     path("usage/",                         AIUsageView.as_view(),           name="ai-usage"),
+    path("conversations/",                AIConversationListCreateView.as_view(), name="ai-conversations"),
+    path("conversations/<uuid:conversation_id>/messages/", AIConversationMessagesView.as_view(), name="ai-conversation-messages"),
     path("chat/", AIChatView.as_view(), name="ai-chat"),
     
 ]

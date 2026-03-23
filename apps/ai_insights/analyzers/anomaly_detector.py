@@ -219,7 +219,7 @@ class AnomalyDetector:
                 a["product_name"]  = product_name
                 a["anomaly_type"]  = "product_level"
                 a["stream"]        = f"product_revenue:{product_name}"
-            anomalies.extend(self._detect_in_stream(f"product:{code}", series))
+                anomalies.append(a)
 
         logger.info("[AnomalyDetector] Product-level: %d anomalies", len(anomalies))
         return anomalies
