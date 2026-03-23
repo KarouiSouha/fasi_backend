@@ -19,6 +19,13 @@ class UserProfileSerializer(serializers.ModelSerializer):
     """
     full_name = serializers.CharField(read_only=True)
     company_name = serializers.CharField(read_only=True)
+    company_industry = serializers.CharField(source="company.industry", read_only=True, default=None, allow_null=True)
+    company_country = serializers.CharField(source="company.country", read_only=True, default=None, allow_null=True)
+    company_city = serializers.CharField(source="company.city", read_only=True, default=None, allow_null=True)
+    company_current_erp = serializers.CharField(source="company.current_erp", read_only=True, default=None, allow_null=True)
+    company_phone = serializers.CharField(source="company.phone", read_only=True, default=None, allow_null=True)
+    company_address = serializers.CharField(source="company.address", read_only=True, default=None, allow_null=True)
+    company_is_active = serializers.BooleanField(source="company.is_active", read_only=True, default=None, allow_null=True)
 
     class Meta:
         model = User
@@ -34,6 +41,13 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "permissions_list",
             "company",
             "company_name",
+            "company_industry",
+            "company_country",
+            "company_city",
+            "company_current_erp",
+            "company_phone",
+            "company_address",
+            "company_is_active",
             "must_change_password",
             "is_verified",
             "created_at",
@@ -41,6 +55,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id", "email", "role", "status", "permissions_list",
             "company", "company_name",
+            "company_industry", "company_country", "company_city",
+            "company_current_erp", "company_phone", "company_address", "company_is_active",
             "full_name", "must_change_password", "is_verified", "created_at",
         ]
 
@@ -293,6 +309,11 @@ class CreateAgentSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("This email address is already in use.")
         return email
 
+    def validate_permissions_list(self, value):
+        if "view-dashboard" not in (value or []):
+            raise serializers.ValidationError("'view-dashboard' permission is required.")
+        return value
+
     def create(self, validated_data):
         temporary_password = validated_data.pop("temporary_password")
         manager = self.context["request"].user
@@ -360,6 +381,7 @@ class UpdateUserPermissionsSerializer(serializers.ModelSerializer):
         allowed_permissions = {
             "import-data",
             "view-dashboard",
+            "view-team",
             "view-reports",
             "view-kpi",
             "view-sales",
@@ -373,6 +395,10 @@ class UpdateUserPermissionsSerializer(serializers.ModelSerializer):
         if invalid:
             raise serializers.ValidationError(
                 f"Invalid permissions: {', '.join(invalid)}."
+            )
+        if "view-dashboard" not in value:
+            raise serializers.ValidationError(
+                "'view-dashboard' permission is required."
             )
         return value
 
