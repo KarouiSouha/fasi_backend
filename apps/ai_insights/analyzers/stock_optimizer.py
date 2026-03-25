@@ -163,6 +163,42 @@ class StockOptimizer:
                 .values_list("material_code", "total_qty_in")
             )
 
+        # Load branch info for each product (get codes first, then fetch branches)
+        product_codes = [row["material_code"] for row in sales]
+        branch_map = {}
+        
+        # First: try to get branches from sales movements
+        for movement in (
+            MaterialMovement.objects
+            .filter(company=company, movement_type="ف بيع", movement_date__gte=start_date,
+                    material_code__in=product_codes)
+            .exclude(branch__isnull=True)
+            .order_by('material_code', '-movement_date')
+            .values('material_code', 'branch__name')
+        ):
+            code = movement.get('material_code')
+            if code and code not in branch_map:
+                branch_map[code] = movement.get('branch__name') or "Unknown"
+        
+        # Second: for products still missing branch, try purchases or other movements
+        missing_codes = [c for c in product_codes if c not in branch_map]
+        if missing_codes:
+            for movement in (
+                MaterialMovement.objects
+                .filter(company=company, material_code__in=missing_codes)
+                .exclude(branch__isnull=True)
+                .order_by('material_code', '-movement_date')
+                .values('material_code', 'branch__name')
+            ):
+                code = movement.get('material_code')
+                if code and code not in branch_map:
+                    branch_map[code] = movement.get('branch__name') or "Unknown"
+        
+        # Fill remaining with "Unknown"
+        for code in product_codes:
+            if code not in branch_map:
+                branch_map[code] = "Unknown"
+
         items = []
         for row in sales:
             code       = row["material_code"]
@@ -185,6 +221,7 @@ class StockOptimizer:
 
             items.append({
                 "product_code": code, "product_name": name,
+                "branch_name": branch_map.get(code, "Unknown"),
                 "total_revenue_lyd": round(total_rev, 2),
                 "qty_sold": round(qty_sold, 2),
                 "transaction_count": txn_count,
