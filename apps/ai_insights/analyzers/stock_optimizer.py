@@ -99,47 +99,94 @@ class StockOptimizer:
         }
 
     # ── Real stock from InventorySnapshotLine ─────────────────────────────────
-
-    def _get_real_stock(self, company) -> dict:
+    # ── Real stock from InventorySnapshotLine ─────────────────────────────────
+    def _get_real_stock(self, company, branch_name: str | None = None) -> dict:
         """
-        v2.0: Read stock from latest InventorySnapshotLine instead of
-        estimating from purchases - sales. Far more accurate.
+        تحميل المخزون الحقيقي من InventorySnapshotLine
+        هذه هي النسخة المحسنة والمستقرة
         """
         try:
-            from apps.inventory.models import InventorySnapshotLine, InventorySnapshot
-            latest_snap = (
-                InventorySnapshot.objects.filter(company=company)
-                .order_by("-uploaded_at").first()
+            from apps.inventory.models import InventorySnapshot, InventorySnapshotLine
+            from django.db.models import Sum
+
+            # الحصول على آخر snapshot مرفوع للشركة
+            latest_snapshot = (
+                InventorySnapshot.objects
+                .filter(company=company)
+                .order_by("-uploaded_at")
+                .first()
             )
-            if not latest_snap:
+
+            if not latest_snapshot:
+                logger.warning(
+                    "[StockOptimizer] No InventorySnapshot found for company=%s. "
+                    "Please upload an inventory Excel file.", company.id
+                )
                 return {}
-            stock_map = {}
-            for line in InventorySnapshotLine.objects.filter(snapshot=latest_snap):
-                code = line.product_code
-                qty  = float(line.quantity or 0)
-                if code:
-                    stock_map[code] = stock_map.get(code, 0) + qty
-            logger.info("[StockOptimizer] Real stock loaded: %d SKUs from snapshot", len(stock_map))
+
+            # بناء الاستعلام
+            lines_qs = InventorySnapshotLine.objects.filter(snapshot=latest_snapshot)
+            
+            if branch_name:
+                lines_qs = lines_qs.filter(branch_name__iexact=branch_name)
+
+            # تجميع الكميات حسب كود المنتج
+            agg_rows = (
+                lines_qs
+                .values("product_code")
+                .annotate(total_qty=Sum("quantity"))
+            )
+
+            stock_map = {
+                row["product_code"]: float(row["total_qty"] or 0)
+                for row in agg_rows
+                if row.get("product_code")
+            }
+
+            logger.info(
+                "[StockOptimizer] Real stock loaded from snapshot %s (%s) → %d SKUs",
+                latest_snapshot.id,
+                latest_snapshot.uploaded_at.date(),
+                len(stock_map)
+            )
+
             return stock_map
+
         except Exception as exc:
-            logger.warning("[StockOptimizer] Could not load InventorySnapshot: %s — falling back to estimate", exc)
+            logger.error(
+                "[StockOptimizer] Error loading real stock from InventorySnapshotLine: %s", 
+                exc, exc_info=True
+            )
             return {}
 
-    # ── Item metrics ──────────────────────────────────────────────────────────
-
     def _compute_item_metrics(self, company) -> list:
+        """ 
+        يستخدم المخزون الحقيقي فقط من InventorySnapshotLine
+        """
         from apps.transactions.models import MaterialMovement
+        from django.db.models import Sum, Count, Min, Max, Q
 
-        today      = date.today()
+        today = date.today()
         start_date = today - timedelta(days=ANALYSIS_WINDOW_DAYS)
 
-        # Attempt real stock first
+        # === 1. تحميل المخزون الحقيقي ===
         real_stock = self._get_real_stock(company)
-        using_real_stock = bool(real_stock)
+        
+        if not real_stock:
+            logger.error(
+                "[StockOptimizer] Cannot proceed: No inventory snapshot found for company=%s", 
+                company.id
+            )
+            return []
 
+        # === 2. جلب بيانات المبيعات ===
         sales = (
             MaterialMovement.objects
-            .filter(company=company, movement_type="ف بيع", movement_date__gte=start_date)
+            .filter(
+                company=company,
+                movement_type="ف بيع",
+                movement_date__gte=start_date
+            )
             .values("material_code", "material_name")
             .annotate(
                 total_revenue=Sum("total_out"),
@@ -152,75 +199,37 @@ class StockOptimizer:
             .order_by("-total_revenue")[:MAX_ITEMS]
         )
 
-        # Fallback stock estimate: purchases - sales
-        if not using_real_stock:
-            purchases = dict(
-                MaterialMovement.objects
-                .filter(company=company, movement_type__contains="شراء",
-                        movement_date__gte=start_date)
-                .values("material_code")
-                .annotate(total_qty_in=Sum("qty_in"))
-                .values_list("material_code", "total_qty_in")
-            )
+        if not sales:
+            logger.warning("[StockOptimizer] No sales data in last %d days for company=%s", 
+                          ANALYSIS_WINDOW_DAYS, company.id)
+            return []
 
-        # Load branch info for each product (get codes first, then fetch branches)
-        product_codes = [row["material_code"] for row in sales]
-        branch_map = {}
-        
-        # First: try to get branches from sales movements
-        for movement in (
-            MaterialMovement.objects
-            .filter(company=company, movement_type="ف بيع", movement_date__gte=start_date,
-                    material_code__in=product_codes)
-            .exclude(branch__isnull=True)
-            .order_by('material_code', '-movement_date')
-            .values('material_code', 'branch__name')
-        ):
-            code = movement.get('material_code')
-            if code and code not in branch_map:
-                branch_map[code] = movement.get('branch__name') or "Unknown"
-        
-        # Second: for products still missing branch, try purchases or other movements
-        missing_codes = [c for c in product_codes if c not in branch_map]
-        if missing_codes:
-            for movement in (
-                MaterialMovement.objects
-                .filter(company=company, material_code__in=missing_codes)
-                .exclude(branch__isnull=True)
-                .order_by('material_code', '-movement_date')
-                .values('material_code', 'branch__name')
-            ):
-                code = movement.get('material_code')
-                if code and code not in branch_map:
-                    branch_map[code] = movement.get('branch__name') or "Unknown"
-        
-        # Fill remaining with "Unknown"
-        for code in product_codes:
-            if code not in branch_map:
-                branch_map[code] = "Unknown"
+        # === 3. تحميل أسماء الفروع ===
+        product_codes = [row["material_code"] for row in sales if row.get("material_code")]
+        branch_map = self._get_branch_map(company, product_codes)   # سنضيفها بعد قليل
 
+        # === 4. بناء الـ items ===
         items = []
         for row in sales:
-            code       = row["material_code"]
-            name       = row["material_name"] or code
-            total_rev  = float(row["total_revenue"] or 0)
-            qty_sold   = float(row["total_qty_sold"] or 0)
-            txn_count  = row["transaction_count"] or 1
-            first_sale = row["first_sale"]
-            last_sale  = row["last_sale"]
+            code = row["material_code"]
+            name = row["material_name"] or code or "Unknown"
 
-            active_days      = max(1, (last_sale - first_sale).days) if first_sale and last_sale else ANALYSIS_WINDOW_DAYS
+            total_rev = float(row.get("total_revenue") or 0)
+            qty_sold = float(row.get("total_qty_sold") or 0)
+            txn_count = row.get("transaction_count") or 1
+
+            first_sale = row.get("first_sale")
+            last_sale = row.get("last_sale")
+
+            active_days = max(1, (last_sale - first_sale).days) if first_sale and last_sale else ANALYSIS_WINDOW_DAYS
             avg_daily_demand = qty_sold / active_days if active_days > 0 else 0
             revenue_per_unit = total_rev / qty_sold if qty_sold > 0 else 0
 
-            if using_real_stock:
-                current_stock = float(real_stock.get(code, 0))
-            else:
-                qty_purchased = float(purchases.get(code, 0) or 0) if not using_real_stock else 0
-                current_stock = max(0, qty_purchased - qty_sold)
+            current_stock = float(real_stock.get(code, 0))
 
             items.append({
-                "product_code": code, "product_name": name,
+                "product_code": code,
+                "product_name": name,
                 "branch_name": branch_map.get(code, "Unknown"),
                 "total_revenue_lyd": round(total_rev, 2),
                 "qty_sold": round(qty_sold, 2),
@@ -229,15 +238,51 @@ class StockOptimizer:
                 "revenue_per_unit_lyd": round(revenue_per_unit, 2),
                 "current_stock": round(current_stock, 2),
                 "active_days": active_days,
-                "stock_source": "real" if using_real_stock else "estimate",
-                "abc_class": None, "revenue_pct": 0.0, "cumulative_pct": 0.0,
-                "reorder_point": 0.0, "safety_stock": 0.0, "eoq": 0,
-                "estimated_days_to_stockout": None, "urgency": "ok",
-                "ai_recommendation": "", "order_suggestion": {},
-                "revenue_at_risk_lyd": 0.0, "confidence": "medium",
+                "stock_source": "real",
+                "abc_class": None,
+                "revenue_pct": 0.0,
+                "cumulative_pct": 0.0,
+                "reorder_point": 0.0,
+                "safety_stock": 0.0,
+                "eoq": 0,
+                "estimated_days_to_stockout": None,
+                "urgency": "ok",
+                "ai_recommendation": "",
+                "order_suggestion": {},
+                "revenue_at_risk_lyd": 0.0,
+                "confidence": "medium",
             })
-        return items
 
+        logger.info("[StockOptimizer] Loaded %d items with REAL stock", len(items))
+        return items
+    def _get_branch_map(self, company, product_codes: list) -> dict:
+        """تحميل اسم الفرع لكل منتج"""
+        if not product_codes:
+            return {}
+
+        from apps.transactions.models import MaterialMovement
+
+        branch_map = {}
+        try:
+            for movement in MaterialMovement.objects.filter(
+                company=company,
+                material_code__in=product_codes,
+                movement_type="ف بيع"
+            ).exclude(branch__isnull=True).order_by('material_code', '-movement_date').values('material_code', 'branch__name'):
+                
+                code = movement.get('material_code')
+                if code and code not in branch_map:
+                    branch_map[code] = movement.get('branch__name') or "Unknown"
+        except Exception:
+            pass
+
+        # تعبئة الباقي
+        for code in product_codes:
+            if code not in branch_map:
+                branch_map[code] = "Unknown"
+
+        return branch_map
+    
     # ── Seasonal indices for dynamic safety stock ─────────────────────────────
 
     @staticmethod
