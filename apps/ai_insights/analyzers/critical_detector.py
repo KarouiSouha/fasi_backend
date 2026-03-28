@@ -216,7 +216,10 @@ class CriticalDetector:
                 if not last:
                     continue
                 days_inactive = (today - last).days
-                revenue       = float(customer["total_revenue"] or 0)
+                # Cap à 365j — au-delà c'est un client inactif archivé, pas un signal utile
+                if days_inactive > 365:
+                    continue
+                revenue = float(customer["total_revenue"] or 0)
                 if days_inactive < 45 or revenue < avg_rev * 0.5:
                     continue
                 recency_score  = min(1.0, days_inactive / 90)
@@ -400,6 +403,18 @@ class CriticalDetector:
                         "recommended_action": "Emergency sales review — identify lost accounts.",
                         "urgency_hours": 48,
                     })
+            # snap = AgingSnapshot.objects.filter(company=company).order_by("-uploaded_at").first()
+            # if snap:
+            #     ag = AgingReceivable.objects.filter(snapshot=snap).aggregate(
+            #         total=Sum("total"), current=Sum("current")
+            #     )
+            #     total_rec  = float(ag["total"]   or 0)
+            #     total_curr = float(ag["current"] or 0)
+            #     overdue    = max(0.0, total_rec - total_curr)
+            #     daily_rev  = curr_rev / 30 if curr_rev > 0 else 1
+            #     dso        = total_rec / daily_rev if daily_rev > 0 else 0
+            #     if dso > 75:
+            # APRÈS — DSO sur 90j de revenus + cap à 730j
             snap = AgingSnapshot.objects.filter(company=company).order_by("-uploaded_at").first()
             if snap:
                 ag = AgingReceivable.objects.filter(snapshot=snap).aggregate(
@@ -408,8 +423,25 @@ class CriticalDetector:
                 total_rec  = float(ag["total"]   or 0)
                 total_curr = float(ag["current"] or 0)
                 overdue    = max(0.0, total_rec - total_curr)
-                daily_rev  = curr_rev / 30 if curr_rev > 0 else 1
-                dso        = total_rec / daily_rev if daily_rev > 0 else 0
+
+                # Utiliser 90j de revenus pour un daily_rev stable
+                # (évite les DSO aberrants quand curr_rev est partiel ou nul)
+                rev_90d = (MaterialMovement.objects
+                        .filter(company=company, movement_type="ف بيع",
+                                movement_date__gte=today - timedelta(days=90))
+                        .aggregate(total=Sum("total_out")))
+                rev_90d_val = float(rev_90d["total"] or 0)
+                daily_rev   = rev_90d_val / 90 if rev_90d_val > 0 else None
+
+                # Pas de revenus sur 90j → DSO incalculable, on skip
+                if not daily_rev:
+                    return situations
+
+                dso = total_rec / daily_rev
+
+                # Cap à 730 jours (2 ans max) — au-delà c'est un artefact de données
+                dso = min(dso, 730)
+
                 if dso > 75:
                     score = WEIGHT_KPI * min(1.0, (dso - 60) / 60)
                     situations.append({

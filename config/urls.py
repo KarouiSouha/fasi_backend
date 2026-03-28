@@ -33,6 +33,7 @@ urlpatterns = [
     # ── AI Insights ───────────────────────────────────────────────────
     path("api/ai-insights/", include("apps.ai_insights.urls")),
 
+
 ]
 
 if settings.DEBUG:

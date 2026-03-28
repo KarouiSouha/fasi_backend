@@ -209,28 +209,48 @@ class Predictor:
         return forecasts
 
     # ── Monte Carlo confidence intervals ──────────────────────────────────────
-
     @staticmethod
     def _add_monte_carlo_ci(forecast: list, model: dict, history: list) -> list:
         """
-        Run MONTE_CARLO_RUNS simulations, each sampling residuals from the
-        historical error distribution. Returns P10 / P50 / P90.
+        Monte Carlo P10/P50/P90.
+        Garantit une variance minimale même si les résidus sont proches de zéro
+        (datasets récents ou très réguliers), sinon P10=P50=P90.
         """
         residuals = model.get("residuals", [])
         if not residuals:
             return forecast
 
-        simulations = [[0.0] * FORECAST_MONTHS for _ in range(MONTE_CARLO_RUNS)]
+        # Variance minimale : 5% de la moyenne des valeurs prévues
+        avg_base = sum(fm["base_lyd"] for fm in forecast) / max(1, len(forecast))
+        min_std = avg_base * 0.05
+
+        residual_std = model.get("residual_std", 0)
+        effective_std = max(residual_std, min_std)
+
+        # Si les résidus réels sont trop petits, on les amplifie proportionnellement
+        if residual_std > 0 and residual_std < min_std:
+            scale = min_std / residual_std
+            residuals = [r * scale for r in residuals]
+
+        simulations = [[0.0] * MONTE_CARLO_RUNS for _ in range(len(forecast))]
         for run in range(MONTE_CARLO_RUNS):
             for j, fm in enumerate(forecast):
-                noise = random.choice(residuals)  # sample from empirical distribution
-                simulations[run][j] = max(0, fm["base_lyd"] + noise)
+                noise = random.choice(residuals)
+                simulations[j][run] = max(0, fm["base_lyd"] + noise)
 
         for j, fm in enumerate(forecast):
-            col = sorted(s[j] for s in simulations)
+            col = sorted(simulations[j])
             p10 = col[int(MONTE_CARLO_RUNS * 0.10)]
             p50 = col[int(MONTE_CARLO_RUNS * 0.50)]
             p90 = col[int(MONTE_CARLO_RUNS * 0.90)]
+
+            # Forcer un spread minimum visible (±3% au moins)
+            if p90 - p10 < fm["base_lyd"] * 0.06:
+                spread = fm["base_lyd"] * 0.03
+                p10 = max(0, fm["base_lyd"] - spread)
+                p90 = fm["base_lyd"] + spread
+                p50 = fm["base_lyd"]
+
             fm["p10_lyd"]         = round(p10, 2)
             fm["p50_lyd"]         = round(p50, 2)
             fm["p90_lyd"]         = round(p90, 2)
@@ -241,7 +261,6 @@ class Predictor:
             fm["downside_pct"] = round((base - p10) / base * 100, 1) if base > 0 else 0
 
         return forecast
-
     # ── Customer forecast ─────────────────────────────────────────────────────
 
     def _forecast_customers(self, company) -> list:
