@@ -20,6 +20,7 @@ from .views import (
     AIUsageView,    
 )
 from .chat_views import AIChatView, AIConversationListCreateView, AIConversationMessagesView
+from .voice_views import VoiceTranscribeView, VoiceSpeakView, ExplainDecisionView
 app_name = "ai_insights"
 
 urlpatterns = [
@@ -40,5 +41,10 @@ urlpatterns = [
     path("conversations/",                AIConversationListCreateView.as_view(), name="ai-conversations"),
     path("conversations/<uuid:conversation_id>/messages/", AIConversationMessagesView.as_view(), name="ai-conversation-messages"),
     path("chat/", AIChatView.as_view(), name="ai-chat"),
-    
+    # ── Voice Intelligence ───────────────────────────────────────────────
+    path("voice/transcribe/", VoiceTranscribeView.as_view(),  name="voice-transcribe"),
+    path("voice/speak/",      VoiceSpeakView.as_view(),       name="voice-speak"),
+ 
+    # ── Explain My Decision ─────────────────────────────────────────────
+    path("chat/explain/",     ExplainDecisionView.as_view(),  name="chat-explain"),
 ]
