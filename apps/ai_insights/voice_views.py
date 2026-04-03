@@ -26,6 +26,7 @@ Feature 2 — Explain My Decision:
 """
 
 import logging
+import base64
 
 from django.conf import settings
 from django.http import StreamingHttpResponse
@@ -107,6 +108,7 @@ class VoiceTranscribeView(APIView):
             return err
 
         audio_file = request.FILES.get("audio")
+        language = (request.data.get("language") or "en").strip().lower()
         if not audio_file:
             return Response({"error": "No audio file provided. Send a 'audio' field."}, status=400)
 
@@ -128,6 +130,7 @@ class VoiceTranscribeView(APIView):
             transcript = client.audio.transcriptions.create(
                 model="whisper-1",
                 file=(name, audio_file.read(), audio_file.content_type or "audio/webm"),
+                language=language,
                 response_format="verbose_json",
             )
 
@@ -172,6 +175,7 @@ class VoiceSpeakView(APIView):
 
         text  = (request.data.get("text") or "").strip()[:MAX_TTS_CHARS]
         voice = (request.data.get("voice") or DEFAULT_TTS_VOICE).lower()
+        as_base64 = bool(request.data.get("as_base64", False))
 
         if not text:
             return Response({"error": "No text provided."}, status=400)
@@ -200,6 +204,12 @@ class VoiceSpeakView(APIView):
             )
 
             audio_bytes = response.content
+
+            if as_base64:
+                return Response({
+                    "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
+                    "mime_type": "audio/mpeg",
+                })
 
             http_response = StreamingHttpResponse(
                 streaming_content=iter([audio_bytes]),
