@@ -32,8 +32,7 @@ urlpatterns = [
     path("api/kpi/", include("apps.kpi.urls")),  # ADD THIS LINE
     # ── AI Insights ───────────────────────────────────────────────────
     path("api/ai-insights/", include("apps.ai_insights.urls")),
-
-
+    path("api/notifications/", include("apps.notifications.urls")),
 ]
 
 if settings.DEBUG:
