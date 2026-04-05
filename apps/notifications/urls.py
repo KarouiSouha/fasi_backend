@@ -5,6 +5,9 @@ urlpatterns = [
     # Liste + filtres + pagination
     path('', views.list_notifications, name='notifications-list'),
 
+    # Détection côté backend (appelée au 1er chargement dashboard)
+    path('detect/', views.detect_notifications, name='notifications-detect'),
+
     # Sync depuis AlertsPage (upsert)
     path('sync/', views.sync_alerts, name='notifications-sync'),
 
