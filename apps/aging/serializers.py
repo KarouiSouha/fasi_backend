@@ -116,6 +116,7 @@ class AgingSnapshotSerializer(serializers.ModelSerializer):
         model  = AgingSnapshot
         fields = [
             "id",
+            "aging_year",
             "report_date",
             "source_file",
             "uploaded_by_name",

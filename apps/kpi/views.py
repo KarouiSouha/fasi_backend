@@ -65,8 +65,41 @@ class CreditKPIView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # ── Base querysets ────────────────────────────────────────────────────
-        latest_snap = AgingSnapshot.objects.filter(company=company).order_by("-uploaded_at").first()
+        snapshot_id_param = request.query_params.get("snapshot_id", "").strip()
+        report_date_param = request.query_params.get("report_date", "").strip()
+        aging_year_param = request.query_params.get("aging_year", "").strip()
+
+        latest_snap = None
+        if snapshot_id_param:
+            try:
+                latest_snap = AgingSnapshot.objects.get(id=snapshot_id_param, company=company)
+            except AgingSnapshot.DoesNotExist:
+                latest_snap = None
+        elif aging_year_param:
+            try:
+                year = int(aging_year_param)
+                latest_snap = (
+                    AgingSnapshot.objects
+                    .filter(company=company, aging_year=year)
+                    .order_by("-uploaded_at")
+                    .first()
+                )
+            except (TypeError, ValueError):
+                latest_snap = None
+        elif report_date_param:
+            latest_snap = (
+                AgingSnapshot.objects
+                .filter(company=company)
+                .filter(
+                    Q(report_date=report_date_param) |
+                    Q(report_date__isnull=True, uploaded_at__date=report_date_param)
+                )
+                .order_by("-uploaded_at")
+                .first()
+            )
+        else:
+            latest_snap = AgingSnapshot.objects.filter(company=company).order_by("-uploaded_at").first()
+
         aging_qs = (
             AgingReceivable.objects.filter(snapshot=latest_snap)
             if latest_snap else AgingReceivable.objects.none()

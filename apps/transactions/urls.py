@@ -7,7 +7,8 @@ from .views import (
     TransactionBranchBreakdownView,
     TransactionMovementTypesView,
     TransactionBranchesView,
-    TransactionBranchMonthlyView, 
+    TransactionBranchMonthlyView,
+    TransactionYearsView,
 )
 
 app_name = "transactions"
@@ -32,6 +33,7 @@ urlpatterns = [
     path("branch-breakdown/", TransactionBranchBreakdownView.as_view(),name="branch-breakdown"),
     
     path("branch-monthly/", TransactionBranchMonthlyView.as_view(), name="branch-monthly"),  # ← new
+    path("years/", TransactionYearsView.as_view(), name="years"),
 
     # GET /api/transactions/{id}/               → full movement detail
     path("<uuid:movement_id>/", TransactionDetailView.as_view(), name="transaction-detail"),

@@ -53,20 +53,50 @@ def _resolve_branch(record: AgingReceivable, sales_map: dict):
     return None
 
 
-def _get_snapshot_and_qs(company, snapshot_id_param: str):
+def _get_snapshot_and_qs(
+    company,
+    snapshot_id_param: str,
+    report_date_param: str = None,
+    aging_year_param: str = None,
+):
     """
     Returns (snapshot, qs).
     - If snapshot_id_param given, fetch that specific snapshot (404 if missing).
+    - If aging_year_param is provided, resolve the latest snapshot for that aging year.
+    - If report_date_param is provided, resolve by report_date or uploaded_at date.
     - Otherwise defaults to the latest snapshot for the company.
     Returns (None, None)          → caller should return 404.
     Returns (None, empty_qs)      → company has no snapshots yet (return empty data).
     Returns (snapshot, qs)        → normal path.
     """
+    snapshot = None
     if snapshot_id_param:
         try:
             snapshot = AgingSnapshot.objects.get(id=snapshot_id_param, company=company)
         except AgingSnapshot.DoesNotExist:
             return None, None
+    elif aging_year_param:
+        try:
+            year = int(aging_year_param)
+            snapshot = (
+                AgingSnapshot.objects
+                .filter(company=company, aging_year=year)
+                .order_by("-uploaded_at")
+                .first()
+            )
+        except (TypeError, ValueError):
+            snapshot = None
+    elif report_date_param:
+        snapshot = (
+            AgingSnapshot.objects
+            .filter(company=company)
+            .filter(
+                Q(report_date=report_date_param) |
+                Q(report_date__isnull=True, uploaded_at__date=report_date_param)
+            )
+            .order_by("-uploaded_at")
+            .first()
+        )
     else:
         snapshot = AgingSnapshot.objects.filter(company=company).order_by("-uploaded_at").first()
 
@@ -111,8 +141,15 @@ class AgingListView(APIView):
     def get(self, request):
         company = request.user.company
         snapshot_id_param = _strip_param(request, "snapshot_id")
+        report_date_param = _strip_param(request, "report_date")
+        aging_year_param = _strip_param(request, "aging_year")
 
-        snapshot, qs_all = _get_snapshot_and_qs(company, snapshot_id_param)
+        snapshot, qs_all = _get_snapshot_and_qs(
+            company,
+            snapshot_id_param,
+            report_date_param,
+            aging_year_param,
+        )
         if snapshot is None and snapshot_id_param:
             return Response({"error": "Snapshot not found."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -187,12 +224,19 @@ class AgingRiskView(APIView):
     def get(self, request):
         company = request.user.company
         snapshot_id_param = _strip_param(request, "snapshot_id")
+        report_date_param = _strip_param(request, "report_date")
+        aging_year_param = _strip_param(request, "aging_year")
 
-        snapshot, qs = _get_snapshot_and_qs(company, snapshot_id_param)
+        snapshot, qs_all = _get_snapshot_and_qs(
+            company,
+            snapshot_id_param,
+            report_date_param,
+            aging_year_param,
+        )
         if snapshot is None and snapshot_id_param:
             return Response({"error": "Snapshot not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        qs = qs.select_related("customer").order_by("-total")
+        qs = qs_all.select_related("customer").order_by("-total")
 
         risk_filter = _strip_param(request, "risk").lower()
         limit = min(100, max(1, int(request.query_params.get("limit", 20))))
@@ -231,8 +275,15 @@ class AgingDistributionView(APIView):
     def get(self, request):
         company = request.user.company
         snapshot_id_param = _strip_param(request, "snapshot_id")
+        report_date_param = _strip_param(request, "report_date")
+        aging_year_param = _strip_param(request, "aging_year")
 
-        snapshot, qs = _get_snapshot_and_qs(company, snapshot_id_param)
+        snapshot, qs = _get_snapshot_and_qs(
+            company,
+            snapshot_id_param,
+            report_date_param,
+            aging_year_param,
+        )
         if snapshot is None and snapshot_id_param:
             return Response({"error": "Snapshot not found."}, status=status.HTTP_404_NOT_FOUND)
 

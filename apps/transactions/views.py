@@ -292,6 +292,27 @@ class TransactionSummaryView(APIView):
         return Response({"summary": list(pivot.values())})
 
 
+class TransactionYearsView(APIView):
+    """
+    GET /api/transactions/years/
+    Returns the distinct years present in transaction movement dates.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from apps.transactions.models import MaterialMovement
+
+        company = request.user.company
+        years = (
+            MaterialMovement.objects
+            .filter(company=company, movement_date__isnull=False)
+            .values_list('movement_date__year', flat=True)
+            .distinct()
+            .order_by('-movement_date__year')
+        )
+        return Response({'years': list(years)})
+
+
 class TransactionTypeBreakdownView(APIView):
     """
     GET /api/transactions/type-breakdown/
