@@ -310,6 +310,26 @@ class CreateAgentSerializer(serializers.ModelSerializer):
         return email
 
     def validate_permissions_list(self, value):
+        if "view-team" in (value or []):
+            raise serializers.ValidationError("'view-team' permission is not allowed for agents.")
+
+        allowed_permissions = {
+            "import-data",
+            "view-dashboard",
+            "view-reports",
+            "view-kpi",
+            "view-sales",
+            "view-inventory",
+            "view-aging",
+            "receive-notifications",
+            "view-profile",
+            "ai-insights",
+        }
+        invalid = set(value) - allowed_permissions
+        if invalid:
+            raise serializers.ValidationError(
+                f"Invalid permissions: {', '.join(invalid)}."
+            )
         if "view-dashboard" not in (value or []):
             raise serializers.ValidationError("'view-dashboard' permission is required.")
         return value
@@ -391,6 +411,11 @@ class UpdateUserPermissionsSerializer(serializers.ModelSerializer):
             "view-profile",
             "ai-insights",
         }
+        
+        # Pour les agents, exclure les permissions liées à la gestion des équipes
+        if self.instance and self.instance.role == User.Role.AGENT:
+            allowed_permissions.discard("view-team")
+        
         invalid = set(value) - allowed_permissions
         if invalid:
             raise serializers.ValidationError(
