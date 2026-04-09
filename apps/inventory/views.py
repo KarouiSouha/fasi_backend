@@ -1,11 +1,13 @@
-from django.db.models import Count, Q, Sum
-from django.db.models.functions import TruncDate
+import uuid
+
+from django.db.models import Q, Sum
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import InventorySnapshot, InventorySnapshotLine
+from apps.data_import.models import ImportLog
+from .models import InventorySnapshotLine
 from .serializers import (
     InventorySnapshotSerializer,
     InventorySnapshotListSerializer,
@@ -14,13 +16,24 @@ from .serializers import (
 from apps.branches.resolver import BranchResolver
 
 
-def _get_company_name(request):
+CURRENT_SNAPSHOT_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
+
+
+def _get_company(request):
     if request.user.company:
-        return request.user.company.name, None
+        return request.user.company, None
     if request.user.is_active and (request.user.is_staff or request.user.is_superuser):
         name = request.query_params.get("company_name", "").strip()
         if name:
-            return name, None
+            from apps.companies.models import Company
+
+            try:
+                return Company.objects.get(name=name), None
+            except Company.DoesNotExist:
+                return None, Response(
+                    {"error": "Company not found for provided company_name."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
         return None, Response(
             {"error": "Please provide company_name query parameter for admin access."},
             status=status.HTTP_400_BAD_REQUEST,
@@ -38,45 +51,116 @@ def _safe_int(value, default: int, min_val: int, max_val: int) -> int:
         return default
 
 
+def _latest_inventory_meta(company):
+    return (
+        ImportLog.objects.filter(company=company, file_type=ImportLog.FileType.INVENTORY)
+        .select_related("imported_by")
+        .order_by("-completed_at", "-started_at")
+        .first()
+    )
+
+
+def _synthetic_snapshot_payload(company):
+    qs = InventorySnapshotLine.objects.filter(company=company)
+    totals = qs.aggregate(total_lines_value=Sum("line_value"))
+    line_count = qs.count()
+    branches = list(qs.values_list("branch_name", flat=True).distinct().order_by("branch_name"))
+    latest_year = qs.exclude(inventory_year__isnull=True).values_list("inventory_year", flat=True).order_by("-inventory_year").first()
+
+    meta = _latest_inventory_meta(company)
+    uploaded_at = (meta.completed_at or meta.started_at) if meta else None
+    source_file = meta.original_filename if meta else ""
+    uploaded_by_id = str(meta.imported_by_id) if meta and meta.imported_by_id else None
+    uploaded_by_name = None
+    if meta and meta.imported_by:
+        uploaded_by_name = meta.imported_by.get_full_name() or meta.imported_by.username
+
+    return {
+        "id": CURRENT_SNAPSHOT_ID,
+        "company_name": company.name,
+        "label": "Current Stock",
+        "inventory_year": latest_year,
+        "snapshot_date": uploaded_at.date() if uploaded_at else None,
+        "fiscal_year": str(latest_year) if latest_year else "",
+        "source_file": source_file,
+        "notes": "",
+        "uploaded_at": uploaded_at,
+        "uploaded_by": uploaded_by_id,
+        "uploaded_by_name": uploaded_by_name,
+        "line_count": line_count,
+        "total_lines_value": totals["total_lines_value"] or 0,
+        "branches": branches,
+    }
+
+
+def _build_lines_response(request, company):
+    qs = InventorySnapshotLine.objects.filter(company=company)
+
+    branch = request.query_params.get("branch", "").strip()
+    if branch:
+        qs = qs.filter(branch_name__iexact=branch)
+
+    search = request.query_params.get("search", "").strip()
+    if search:
+        qs = qs.filter(
+            Q(product_name__icontains=search) | Q(product_code__icontains=search)
+        )
+
+    totals = qs.aggregate(
+        grand_total_qty=Sum("quantity"),
+        grand_total_value=Sum("line_value"),
+    )
+    distinct_products = qs.values("product_code").distinct().count()
+    out_of_stock_count = qs.filter(quantity=0).count()
+    critical_count = qs.filter(quantity__gt=0, quantity__lt=30).count()
+    low_count = qs.filter(quantity__gte=30, quantity__lte=50).count()
+    total_lines = qs.count()
+
+    page = _safe_int(request.query_params.get("page", 1), default=1, min_val=1, max_val=10_000)
+    page_size = _safe_int(request.query_params.get("page_size", 100), default=100, min_val=1, max_val=500)
+    qs_page = qs[(page - 1) * page_size: page * page_size]
+
+    return {
+        "snapshot_id": str(CURRENT_SNAPSHOT_ID),
+        "count": total_lines,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": max(1, (total_lines + page_size - 1) // page_size),
+        "totals": {
+            "grand_total_qty": float(totals["grand_total_qty"] or 0),
+            "grand_total_value": float(totals["grand_total_value"] or 0),
+            "distinct_products": distinct_products,
+            "out_of_stock_count": out_of_stock_count,
+            "critical_count": critical_count,
+            "low_count": low_count,
+        },
+        "lines": InventorySnapshotLineSerializer(qs_page, many=True).data,
+    }
+
+
 class InventoryListView(APIView):
     """
     GET /api/inventory/
-    Returns a paginated list of InventorySnapshot sessions for the company.
+    Returns a single synthetic session representing current stock.
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        company_name, err = _get_company_name(request)
+        company, err = _get_company(request)
         if err:
             return err
 
-        qs = (
-            InventorySnapshot.objects
-            .filter(company_name=company_name)
-            .annotate(
-                line_count=Count("lines"),
-                total_lines_value=Sum("lines__line_value"),
-            )
-            .order_by("-uploaded_at")
-        )
-
-        search = request.query_params.get("search", "").strip()
-        if search:
-            qs = qs.filter(
-                Q(label__icontains=search) | Q(source_file__icontains=search)
-            )
-
-        total = qs.count()
-        page      = _safe_int(request.query_params.get("page", 1),      default=1,  min_val=1,  max_val=10_000)
-        page_size = _safe_int(request.query_params.get("page_size", 20), default=20, min_val=1,  max_val=100)
-        qs_page = qs[(page - 1) * page_size: page * page_size]
+        item = _synthetic_snapshot_payload(company)
+        page = _safe_int(request.query_params.get("page", 1), default=1, min_val=1, max_val=10_000)
+        page_size = _safe_int(request.query_params.get("page_size", 20), default=20, min_val=1, max_val=100)
+        items = [item] if page == 1 else []
 
         return Response({
-            "count":       total,
-            "page":        page,
-            "page_size":   page_size,
-            "total_pages": max(1, (total + page_size - 1) // page_size),
-            "items":       InventorySnapshotListSerializer(qs_page, many=True).data,
+            "count": 1,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": 1,
+            "items": InventorySnapshotListSerializer(items, many=True).data,
         })
 
 
@@ -85,34 +169,19 @@ class InventoryDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, snapshot_id):
-        company_name, err = _get_company_name(request)
+        company, err = _get_company(request)
         if err:
             return err
-        try:
-            snapshot = (
-                InventorySnapshot.objects
-                .annotate(
-                    line_count=Count("lines"),
-                    total_lines_value=Sum("lines__line_value"),
-                )
-                .get(id=snapshot_id, company_name=company_name)
-            )
-        except InventorySnapshot.DoesNotExist:
-            return Response({"error": "Snapshot not found."}, status=status.HTTP_404_NOT_FOUND)
-        return Response(InventorySnapshotSerializer(snapshot).data)
+
+        payload = _synthetic_snapshot_payload(company)
+        return Response(InventorySnapshotSerializer(payload).data)
 
     def delete(self, request, snapshot_id):
-        company_name, err = _get_company_name(request)
+        company, err = _get_company(request)
         if err:
             return err
-        try:
-            snapshot = InventorySnapshot.objects.get(
-                id=snapshot_id,
-                company_name=company_name,
-            )
-        except InventorySnapshot.DoesNotExist:
-            return Response({"error": "Snapshot not found."}, status=status.HTTP_404_NOT_FOUND)
-        snapshot.delete()
+
+        InventorySnapshotLine.objects.filter(company=company).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -129,66 +198,22 @@ class InventorySnapshotLinesView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, snapshot_id):
-        company_name, err = _get_company_name(request)
+        company, err = _get_company(request)
         if err:
             return err
-        try:
-            snapshot = InventorySnapshot.objects.get(
-                id=snapshot_id,
-                company_name=company_name,
-            )
-        except InventorySnapshot.DoesNotExist:
-            return Response({"error": "Snapshot not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(_build_lines_response(request, company))
 
-        qs = snapshot.lines.all()
 
-        # ✅ FIX: use iexact instead of icontains to match exactly the branch name
-        # icontains could match multiple branches (e.g. "Tripoli" matches "Tripoli Est" too)
-        branch = request.query_params.get("branch", "").strip()
-        if branch:
-            qs = qs.filter(branch_name__iexact=branch)
+class InventoryLinesView(APIView):
+    """GET /api/inventory/lines/ — paginated current stock lines."""
 
-        search = request.query_params.get("search", "").strip()
-        if search:
-            qs = qs.filter(
-                Q(product_name__icontains=search) | Q(product_code__icontains=search)
-            )
+    permission_classes = [IsAuthenticated]
 
-        # ✅ Compute ALL totals on the full filtered queryset BEFORE pagination
-        # This ensures distinct_products reflects the correct count for the branch
-        totals = qs.aggregate(
-            grand_total_qty=Sum("quantity"),
-            grand_total_value=Sum("line_value"),
-        )
-        # ✅ distinct_products = unique products in the filtered branch (not total lines)
-        distinct_products  = qs.values("product_code").distinct().count()
-        out_of_stock_count = qs.filter(quantity=0).count()
-        critical_count     = qs.filter(quantity__gt=0, quantity__lt=30).count()
-        low_count          = qs.filter(quantity__gte=30, quantity__lte=50).count()
-        total_lines        = qs.count()
-
-        # Paginate AFTER computing totals
-        page      = _safe_int(request.query_params.get("page", 1),       default=1,   min_val=1, max_val=10_000)
-        page_size = _safe_int(request.query_params.get("page_size", 100), default=100, min_val=1, max_val=500)
-        qs_page = qs[(page - 1) * page_size: page * page_size]
-
-        return Response({
-            "snapshot_id": str(snapshot_id),
-            "count":       total_lines,
-            "page":        page,
-            "page_size":   page_size,
-            "total_pages": max(1, (total_lines + page_size - 1) // page_size),
-            "totals": {
-                "grand_total_qty":    float(totals["grand_total_qty"]   or 0),
-                "grand_total_value":  float(totals["grand_total_value"] or 0),
-                # ✅ distinct_products = nb de produits uniques dans la branch filtrée
-                "distinct_products":  distinct_products,
-                "out_of_stock_count": out_of_stock_count,
-                "critical_count":     critical_count,
-                "low_count":          low_count,
-            },
-            "lines": InventorySnapshotLineSerializer(qs_page, many=True).data,
-        })
+    def get(self, request):
+        company, err = _get_company(request)
+        if err:
+            return err
+        return Response(_build_lines_response(request, company))
 
 
 class InventoryBranchSummaryView(APIView):
@@ -199,19 +224,14 @@ class InventoryBranchSummaryView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        company_name, err = _get_company_name(request)
+        company, err = _get_company(request)
         if err:
             return err
 
         qs = InventorySnapshotLine.objects.filter(
-            snapshot__company_name=company_name,
+            company=company,
         )
 
-        snapshot_id = request.query_params.get("snapshot_id", "").strip()
-        if snapshot_id:
-            qs = qs.filter(snapshot_id=snapshot_id)
-
-        # ✅ FIX: use iexact for exact branch name matching
         branch = request.query_params.get("branch", "").strip()
         if branch:
             qs = qs.filter(branch_name__iexact=branch)
@@ -267,19 +287,14 @@ class InventoryCategoryBreakdownView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        company_name, err = _get_company_name(request)
+        company, err = _get_company(request)
         if err:
             return err
 
         qs = InventorySnapshotLine.objects.filter(
-            snapshot__company_name=company_name,
+            company=company,
         )
 
-        snapshot_id = request.query_params.get("snapshot_id", "").strip()
-        if snapshot_id:
-            qs = qs.filter(snapshot_id=snapshot_id)
-
-        # ✅ FIX: use iexact for exact branch name matching
         branch = request.query_params.get("branch", "").strip()
         if branch:
             qs = qs.filter(branch_name__iexact=branch)
@@ -310,16 +325,15 @@ class InventorySnapshotDatesView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        company_name, err = _get_company_name(request)
+        company, err = _get_company(request)
         if err:
             return err
 
         dates = (
-            InventorySnapshot.objects
-            .filter(company_name=company_name)
-            .annotate(import_date=TruncDate("uploaded_at"))
-            .values_list("import_date", flat=True)
+            ImportLog.objects
+            .filter(company=company, file_type=ImportLog.FileType.INVENTORY)
+            .values_list("completed_at", flat=True)
             .distinct()
-            .order_by("-import_date")
+            .order_by("-completed_at")
         )
-        return Response({"dates": [str(d) for d in dates if d]})
+        return Response({"dates": [d.date().isoformat() for d in dates if d]})

@@ -106,27 +106,17 @@ class StockOptimizer:
         هذه هي النسخة المحسنة والمستقرة
         """
         try:
-            from apps.inventory.models import InventorySnapshot, InventorySnapshotLine
+            from apps.inventory.models import InventorySnapshotLine
             from django.db.models import Sum
 
-            # الحصول على آخر snapshot مرفوع للشركة
-            latest_snapshot = (
-                InventorySnapshot.objects
-                .filter(company=company)
-                .order_by("-uploaded_at")
-                .first()
-            )
-
-            if not latest_snapshot:
+            lines_qs = InventorySnapshotLine.objects.filter(company=company)
+            if not lines_qs.exists():
                 logger.warning(
-                    "[StockOptimizer] No InventorySnapshot found for company=%s. "
+                    "[StockOptimizer] No inventory lines found for company=%s. "
                     "Please upload an inventory Excel file.", company.id
                 )
                 return {}
 
-            # بناء الاستعلام
-            lines_qs = InventorySnapshotLine.objects.filter(snapshot=latest_snapshot)
-            
             if branch_name:
                 lines_qs = lines_qs.filter(branch_name__iexact=branch_name)
 
@@ -144,9 +134,7 @@ class StockOptimizer:
             }
 
             logger.info(
-                "[StockOptimizer] Real stock loaded from snapshot %s (%s) → %d SKUs",
-                latest_snapshot.id,
-                latest_snapshot.uploaded_at.date(),
+                "[StockOptimizer] Real stock loaded from current inventory lines (%d SKUs)",
                 len(stock_map)
             )
 

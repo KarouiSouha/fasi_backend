@@ -329,7 +329,7 @@ class InventoryParser:
         col i    → qty    (header = branch name, e.g. "فرع الكريمية")
         col i+1  → value  (header usually starts with "قيمة …")
 
-    Result: one InventorySnapshot (session) + N×M InventorySnapshotLine rows.
+    Result: current-stock rows only in InventorySnapshotLine.
     """
 
     _TOTAL_QTY_KW = [
@@ -343,7 +343,7 @@ class InventoryParser:
     ]
 
     def parse(self, rows: List, company, extra_context=None) -> Dict:
-        from apps.inventory.models import InventorySnapshot, InventorySnapshotLine
+        from apps.inventory.models import InventorySnapshotLine
 
         extra_context = extra_context or {}
         user = extra_context.get("user")
@@ -427,29 +427,18 @@ class InventoryParser:
             )
         inventory_year = int(year_match.group(1))
 
-        # ── Upsert: delete old snapshot for same company + year ─────────
+        # ── Upsert: replace current stock for the company ───────────────
         company_name = company.name if company else extra_context.get("company_name", "")
         if company:
-            old_qs = InventorySnapshot.objects.filter(
-                company=company, inventory_year=inventory_year
-            )
+            old_qs = InventorySnapshotLine.objects.filter(company=company)
             deleted_count = old_qs.count()
             old_qs.delete()
             if deleted_count:
                 logger.info(
-                    "[InventoryParser] Replaced %d existing snapshot(s) for "
+                    "[InventoryParser] Replaced %d existing inventory line(s) for "
                     "company=%s year=%d.",
                     deleted_count, company_name, inventory_year,
                 )
-
-        # ── Create new snapshot session record ──────────────────────────
-        snapshot = InventorySnapshot.objects.create(
-            company=company,
-            company_name=company_name,
-            inventory_year=inventory_year,
-            source_file=source_file,
-            uploaded_by=user,
-        )
 
         # ── Melt: 1 Excel row → len(branch_pairs) InventorySnapshotLine rows ──
         lines_created = 0
@@ -472,7 +461,11 @@ class InventoryParser:
                     val = _to_decimal(row[val_idx]) if len(row) > val_idx else Decimal("0")
                     lines.append(
                         InventorySnapshotLine(
-                            snapshot=snapshot,
+                            company=company,
+                            company_name=company_name,
+                            inventory_year=inventory_year,
+                            source_file=source_file,
+                            uploaded_by=user,
                             product_category=product_category,
                             product_code=product_code,
                             product_name=product_name,
@@ -490,9 +483,8 @@ class InventoryParser:
             except Exception as e:
                 errors.append({"row": row_idx, "error": str(e)})
 
-        # Roll back empty snapshot only if every row failed
+        # Roll back empty import only if every row failed
         if lines_created == 0 and len(data_rows) > 0:
-            snapshot.delete()
             return {
                 "total": len(data_rows), "created": 0, "updated": 0,
                 "errors": errors or [{"row": 0, "error": "No lines were imported."}],
@@ -503,7 +495,7 @@ class InventoryParser:
             "created": lines_created,
             "products_count": len(data_rows) - len(errors),
             "updated": 0,
-            "snapshot_id": str(snapshot.id),
+            "snapshot_id": "00000000-0000-0000-0000-000000000001",
             "inventory_year": inventory_year,
             "branches_detected": detected_branches,
             "errors": errors,

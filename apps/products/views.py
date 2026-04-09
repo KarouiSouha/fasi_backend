@@ -157,7 +157,7 @@ class ProductCategoryListView(APIView):
 class ProductInventoryHistoryView(APIView):
     """
     GET /api/products/{id}/inventory/
-    Returns all inventory snapshots for the given product, ordered by import date DESC.
+    Returns current inventory totals for the given product across branches.
     """
 
     permission_classes = [IsAuthenticated]
@@ -168,13 +168,18 @@ class ProductInventoryHistoryView(APIView):
         except Product.DoesNotExist:
             return Response({"error": "Product not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        from apps.inventory.models import InventorySnapshot
-        from apps.inventory.serializers import InventorySnapshotSerializer
+        from apps.inventory.models import InventorySnapshotLine
 
-        snapshots = InventorySnapshot.objects.filter(
+        lines_qs = InventorySnapshotLine.objects.filter(
             company=request.user.company,
-            product=product,
-        ).order_by("-created_at")
+            product_code=product.product_code,
+        )
+
+        by_branch = (
+            lines_qs.values("branch_name")
+            .annotate(total_qty=Sum("quantity"), total_value=Sum("line_value"))
+            .order_by("branch_name")
+        )
 
         return Response({
             "product": {
@@ -182,7 +187,16 @@ class ProductInventoryHistoryView(APIView):
                 "code": product.product_code,
                 "name": product.product_name,
             },
-            "snapshots": InventorySnapshotSerializer(snapshots, many=True).data,
+            "total_qty": float(lines_qs.aggregate(v=Sum("quantity"))["v"] or 0),
+            "total_value": float(lines_qs.aggregate(v=Sum("line_value"))["v"] or 0),
+            "branches": [
+                {
+                    "branch": row["branch_name"],
+                    "qty": float(row["total_qty"] or 0),
+                    "value": float(row["total_value"] or 0),
+                }
+                for row in by_branch
+            ],
         })
 
 

@@ -38,7 +38,7 @@ def detect_notifications_for_user(request):
 
     # Deferred imports avoid cross-app import side effects at startup.
     from apps.aging.models import AgingSnapshot, AgingReceivable
-    from apps.inventory.models import InventorySnapshot, InventorySnapshotLine
+    from apps.inventory.models import InventorySnapshotLine
 
     latest_aging = AgingSnapshot.objects.filter(company=company).order_by('-uploaded_at').first()
     if latest_aging:
@@ -86,16 +86,22 @@ def detect_notifications_for_user(request):
             if was_created:
                 created_or_updated += 1
 
-    latest_inventory = InventorySnapshot.objects.filter(company=company).order_by('-uploaded_at').first()
-    if latest_inventory:
+    latest_inventory_date = (
+        InventorySnapshotLine.objects
+        .filter(company=company)
+        .order_by('-uploaded_at')
+        .values_list('uploaded_at', flat=True)
+        .first()
+    )
+    if latest_inventory_date:
         low_stock_lines = (
             InventorySnapshotLine.objects
-            .filter(snapshot=latest_inventory, quantity__lte=0)
+            .filter(company=company, quantity__lte=0)
             .order_by('line_value')[:20]
         )
 
         for line in low_stock_lines:
-            frontend_id = f"low-stock:{latest_inventory.id}:{line.product_code}:{line.branch_name}"
+            frontend_id = f"low-stock:{company_id}:{line.product_code}:{line.branch_name}"
             _, was_created = Notification.objects.update_or_create(
                 company_id=company_id,
                 frontend_id=frontend_id,
@@ -104,10 +110,10 @@ def detect_notifications_for_user(request):
                     'severity': 'critical',
                     'title': f"Stockout risk: {line.product_name or line.product_code}",
                     'message': f"{line.branch_name}: quantity is {line.quantity} for {line.product_code}.",
-                    'detail': f"Latest inventory snapshot: {latest_inventory.uploaded_at:%Y-%m-%d}",
+                    'detail': f"Latest inventory import: {latest_inventory_date:%Y-%m-%d}",
                     'metadata': {
                         'source': 'server_detect',
-                        'snapshot_id': str(latest_inventory.id),
+                        'snapshot_id': '00000000-0000-0000-0000-000000000001',
                         'product_code': line.product_code,
                         'product_name': line.product_name,
                         'branch_name': line.branch_name,

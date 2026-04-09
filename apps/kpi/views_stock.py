@@ -32,7 +32,7 @@ from decimal import Decimal
 from datetime import date
 
 from django.db.models import Sum, DecimalField
-from django.db.models.functions import Coalesce
+from django.db.models.functions import Coalesce, Trim
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -48,6 +48,11 @@ DEFAULT_LEAD_TIME_DAYS = 14
 SAFETY_FACTOR          = 0.5
 
 
+def normalize_key(value: str) -> str:
+    """Normalize text for resilient joins/lookup (trim + collapse spaces + lower)."""
+    return " ".join((value or "").split()).lower()
+
+
 class StockKPIView(APIView):
     """
     GET /api/kpi/stock/
@@ -61,29 +66,63 @@ class StockKPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        from apps.inventory.models import InventorySnapshot, InventorySnapshotLine
+        from apps.inventory.models import InventorySnapshotLine
         from apps.transactions.models import MaterialMovement
 
         company = request.user.company
 
-        year = int(request.query_params.get("year", date.today().year))
+        year_param = request.query_params.get("year")
         branch = (request.query_params.get("branch") or "").strip()
         rotation_threshold = float(
             request.query_params.get("low_rotation_threshold", LOW_ROTATION_THRESHOLD)
         )
+
+        branch_normalized = " ".join(branch.split())
+
+        # "Now" behavior: if no explicit year is provided, use the latest
+        # available company movement year so branch-scoped data does not
+        # accidentally collapse to an older sparse period.
+        if year_param:
+            year = int(year_param)
+        else:
+            latest_company_movement_date = (
+                MaterialMovement.objects.filter(company=company)
+                .order_by("-movement_date")
+                .values_list("movement_date", flat=True)
+                .first()
+            )
+            year = (
+                latest_company_movement_date.year
+                if latest_company_movement_date
+                else date.today().year
+            )
 
         period_from = date(year, 1, 1)
         period_to   = date(year, 12, 31)
         n_days      = (period_to - period_from).days + 1
 
         # ── Base movement queryset for the period ────────────────────────────
-        base_mvt = MaterialMovement.objects.filter(
+        company_mvt = MaterialMovement.objects.filter(
             company=company,
             movement_date__gte=period_from,
             movement_date__lte=period_to,
         )
-        if branch:
-            base_mvt = base_mvt.filter(branch__name=branch)
+
+        branch_mvt = company_mvt
+        if branch_normalized:
+            branch_mvt = branch_mvt.annotate(
+                branch_clean=Trim("branch__name")
+            ).filter(branch_clean__iexact=branch_normalized)
+
+        # Prefer branch-scoped movements when they exist; otherwise keep the
+        # branch inventory filter and fall back to company movements so the
+        # KPI charts remain populated.
+        if branch_normalized and branch_mvt.exists():
+            base_mvt = branch_mvt
+            movement_scope_used = "branch"
+        else:
+            base_mvt = company_mvt
+            movement_scope_used = "company_fallback" if branch_normalized else "company"
 
         # ── 1. Quantité vendue — grouped by material_name ────────────────────
         sales_qs = (
@@ -97,7 +136,7 @@ class StockKPIView(APIView):
         )
         sales_by_name: dict = {}
         for row in sales_qs:
-            key = (row["material_name"] or "").strip().lower()
+            key = normalize_key(row["material_name"] or "")
             if key:
                 sales_by_name[key] = {
                     "qty_sold": float(row["qty_sold"]),
@@ -115,7 +154,7 @@ class StockKPIView(APIView):
         )
         opening_by_name: dict = {}
         for row in opening_qs:
-            key = (row["material_name"] or "").strip().lower()
+            key = normalize_key(row["material_name"] or "")
             if key:
                 opening_by_name[key] = float(row["qty_opening"])
 
@@ -130,16 +169,18 @@ class StockKPIView(APIView):
         )
         purchase_by_name: dict = {}
         for row in purchase_qs:
-            key = (row["material_name"] or "").strip().lower()
+            key = normalize_key(row["material_name"] or "")
             if key:
                 purchase_by_name[key] = float(row["qty_purchased"])
 
-        # ── 4. Inventory snapshot lines — grouped by product_name ────────────
-        inv_lines = InventorySnapshotLine.objects.filter(snapshot__company=company)
-        if branch:
-            inv_lines = inv_lines.filter(branch_name=branch)
+        # ── 4. Inventory snapshot lines — grouped by product_name + optional branch ──
+        inv_lines = InventorySnapshotLine.objects.filter(company=company)
+        if branch_normalized:
+            inv_lines = inv_lines.annotate(
+                branch_clean=Trim("branch_name")
+            ).filter(branch_clean__iexact=branch_normalized)
 
-        inv_lines = (
+        inv_lines_list = (
             inv_lines
             .values("product_name", "product_code", "product_category")
             .annotate(
@@ -154,6 +195,31 @@ class StockKPIView(APIView):
             )
         )
 
+        zero_stock_lines = (
+            inv_lines
+            .values("product_name", "product_code", "product_category", "branch_name")
+            .annotate(
+                total_qty=Coalesce(Sum("quantity"), Decimal("0")),
+                total_value=Coalesce(Sum("line_value"), Decimal("0")),
+            )
+        )
+        
+        # ── Debug: log available inventory branches ──────────────────────────
+        raw_branches = (
+            InventorySnapshotLine.objects.filter(company=company)
+            .exclude(branch_name__isnull=True)
+            .annotate(branch_clean=Trim("branch_name"))
+            .values_list("branch_clean", flat=True)
+            .distinct()
+        )
+        available_branches = sorted(
+            {" ".join((b or "").split()) for b in raw_branches if (b or "").strip()}
+        )
+        logger.info(
+            f"Stock KPI: available inventory branches: {available_branches}, "
+            f"requested branch: '{branch}', movement_scope_used: {movement_scope_used}"
+        )
+
         # ── 5. Per-product KPIs ──────────────────────────────────────────────
         all_products      = []
         zero_stock        = []
@@ -161,7 +227,7 @@ class StockKPIView(APIView):
         total_stock_value = 0.0
         total_stock_qty   = 0.0
 
-        for line in inv_lines:
+        for line in inv_lines_list:
             stock_qty        = float(line["total_qty"])
             stock_val        = float(line["total_value"])
             product_name     = line["product_name"]     or ""
@@ -176,7 +242,7 @@ class StockKPIView(APIView):
             total_stock_value += stock_val
             total_stock_qty   += stock_qty
 
-            name_key  = product_name.strip().lower()
+            name_key  = normalize_key(product_name)
             sales     = sales_by_name.get(name_key, {"qty_sold": 0.0, "revenue": 0.0})
             qty_sold  = sales["qty_sold"]
 
@@ -254,14 +320,6 @@ class StockKPIView(APIView):
             }
             all_products.append(product_data)
 
-            if stock_qty == 0:
-                zero_stock.append({
-                    "material_code": product_code,
-                    "product_name":  product_name,
-                    "category":      product_category,
-                    "qty_sold":      qty_sold,
-                })
-
             if stock_qty > 0 and rotation_rate < rotation_threshold:
                 low_rotation.append({
                     "material_code":  product_code,
@@ -274,6 +332,16 @@ class StockKPIView(APIView):
                     "qty_purchased":  qty_purchased,
                     "rotation_rate":  rotation_rate,
                     "coverage_days":  coverage_days,
+                })
+
+        for line in zero_stock_lines:
+            branch_stock_qty = float(line["total_qty"])
+            if branch_stock_qty == 0:
+                zero_stock.append({
+                    "material_code": line["product_code"] or "",
+                    "product_name":  line["product_name"] or "",
+                    "category":      line["product_category"] or "",
+                    "qty_sold":      sales_by_name.get(normalize_key(line["product_name"] or ""), {"qty_sold": 0.0, "revenue": 0.0})["qty_sold"],
                 })
 
         low_rotation.sort(key=lambda x: -x["stock_value"])
@@ -292,6 +360,9 @@ class StockKPIView(APIView):
         return Response({
             "snapshot_date": None,
             "year":          year,
+            "branch_filter": branch or None,
+            "movement_scope_used": movement_scope_used,
+            "available_branches": available_branches,
             "period":        {"from": str(period_from), "to": str(period_to)},
             "rotation_formula": "qty_sold / (stock_initial + achats)",
             "stock_summary": {

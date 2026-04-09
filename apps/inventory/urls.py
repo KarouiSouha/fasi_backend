@@ -3,6 +3,7 @@ from .views import (
     InventoryListView,
     InventoryDetailView,
     InventorySnapshotLinesView,
+    InventoryLinesView,
     InventoryBranchSummaryView,
     InventorySnapshotDatesView,
     InventoryCategoryBreakdownView,
@@ -13,6 +14,9 @@ app_name = "inventory"
 urlpatterns = [
     # GET  /api/inventory/                           → list of snapshot sessions
     path("", InventoryListView.as_view(), name="inventory-list"),
+
+    # GET  /api/inventory/lines/                     → paginated current stock lines
+    path("lines/", InventoryLinesView.as_view(), name="inventory-lines-current"),
 
     # GET  /api/inventory/dates/                     → distinct import dates
     path("dates/", InventorySnapshotDatesView.as_view(), name="inventory-dates"),

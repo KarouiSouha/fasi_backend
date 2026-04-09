@@ -337,7 +337,7 @@ class KPIAnalyzer:
                 for r in sales_qs
             }
 
-            inv_lines = InventorySnapshotLine.objects.filter(snapshot__company=company)
+            inv_lines = InventorySnapshotLine.objects.filter(company=company)
             if branch:
                 inv_lines = inv_lines.filter(branch_name=branch)
 

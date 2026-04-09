@@ -1,4 +1,7 @@
 from rest_framework import serializers
+from django.db.models import Sum
+
+from apps.inventory.models import InventorySnapshotLine
 from .models import Product
 
 
@@ -35,12 +38,23 @@ class ProductDetailSerializer(serializers.ModelSerializer):
         return obj.movements.count()
 
     def get_latest_snapshot_date(self, obj):
-        snap = obj.inventory_snapshots.order_by("-created_at").first()
-        return snap.created_at.date() if snap else None
+        latest = (
+            InventorySnapshotLine.objects
+            .filter(company=obj.company, product_code=obj.product_code)
+            .order_by("-uploaded_at")
+            .values_list("uploaded_at", flat=True)
+            .first()
+        )
+        return latest.date() if latest else None
 
     def get_total_stock(self, obj):
-        snap = obj.inventory_snapshots.order_by("-created_at").first()
-        return float(snap.total_qty) if snap else None
+        total = (
+            InventorySnapshotLine.objects
+            .filter(company=obj.company, product_code=obj.product_code)
+            .aggregate(v=Sum("quantity"))
+            .get("v")
+        )
+        return float(total) if total is not None else None
 
 
 class ProductWriteSerializer(serializers.ModelSerializer):
