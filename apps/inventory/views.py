@@ -51,6 +51,46 @@ def _safe_int(value, default: int, min_val: int, max_val: int) -> int:
         return default
 
 
+def _resolve_branch_filter_names(company, branch_value: str) -> list[str]:
+    """
+    Resolve a branch filter coming from the UI to the raw branch_name values
+    stored in InventorySnapshotLine.
+
+    The UI works with canonical branch names, while inventory lines keep the
+    branch label as imported from Excel. We therefore map canonical → raw
+    values before filtering.
+    """
+    normalized = " ".join((branch_value or "").split()).strip()
+    if not normalized:
+        return []
+
+    resolver = BranchResolver(company) if company else None
+    target_branch = resolver.resolve(normalized) if resolver else None
+
+    raw_names = list(
+        InventorySnapshotLine.objects.filter(company=company)
+        .values_list("branch_name", flat=True)
+        .distinct()
+    )
+
+    if target_branch and resolver:
+        matching_raw_names: list[str] = []
+        for raw_name in raw_names:
+            resolved = resolver.resolve(raw_name)
+            if resolved and resolved.id == target_branch.id:
+              matching_raw_names.append(raw_name)
+        if matching_raw_names:
+            return matching_raw_names
+
+    # Fallback: case-insensitive comparison on the raw values.
+    normalized_lower = normalized.lower()
+    return [
+        raw_name
+        for raw_name in raw_names
+        if " ".join((raw_name or "").split()).lower() == normalized_lower
+    ]
+
+
 def _latest_inventory_meta(company):
     return (
         ImportLog.objects.filter(company=company, file_type=ImportLog.FileType.INVENTORY)
@@ -98,7 +138,11 @@ def _build_lines_response(request, company):
 
     branch = request.query_params.get("branch", "").strip()
     if branch:
-        qs = qs.filter(branch_name__iexact=branch)
+        branch_names = _resolve_branch_filter_names(company, branch)
+        if branch_names:
+            qs = qs.filter(branch_name__in=branch_names)
+        else:
+            qs = qs.none()
 
     search = request.query_params.get("search", "").strip()
     if search:
@@ -234,7 +278,11 @@ class InventoryBranchSummaryView(APIView):
 
         branch = request.query_params.get("branch", "").strip()
         if branch:
-            qs = qs.filter(branch_name__iexact=branch)
+            branch_names = _resolve_branch_filter_names(company, branch)
+            if branch_names:
+                qs = qs.filter(branch_name__in=branch_names)
+            else:
+                qs = qs.none()
 
         rows = (
             qs.values("branch_name")
@@ -297,7 +345,11 @@ class InventoryCategoryBreakdownView(APIView):
 
         branch = request.query_params.get("branch", "").strip()
         if branch:
-            qs = qs.filter(branch_name__iexact=branch)
+            branch_names = _resolve_branch_filter_names(company, branch)
+            if branch_names:
+                qs = qs.filter(branch_name__in=branch_names)
+            else:
+                qs = qs.none()
 
         breakdown = (
             qs.values("product_category")
