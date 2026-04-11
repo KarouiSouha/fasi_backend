@@ -128,6 +128,17 @@ class ExcelUploadView(APIView):
             log.completed_at = datetime.now(tz=timezone.utc)
             log.save()
 
+            if detected_type == "movements":
+                try:
+                    from .services.excel_vector_ingest import ExcelVectorIngestService
+
+                    ExcelVectorIngestService().index_movements(
+                        company,
+                        date_range=result.get("date_range"),
+                    )
+                except Exception as exc:
+                    logger.warning("[ExcelUploadView] Vector ingestion skipped: %s", exc)
+
             logger.info(
                 f"[ExcelUploadView] Import complete: '{file_obj.name}' "
                 f"({detected_type}) for company '{company.name}' "

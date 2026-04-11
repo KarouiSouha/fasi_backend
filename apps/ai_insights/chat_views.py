@@ -505,7 +505,7 @@ class AIChatView(APIView):
             metadata={},
         )
 
-        # Call AI
+        # Call AI via RAG-enhanced pipeline first. via RAG-enhanced pipeline first.
         try:
             reply = self._call_ai(system_prompt, api_messages, company)
             if reply:
@@ -554,10 +554,26 @@ class AIChatView(APIView):
     def _call_ai(self, system_prompt: str, messages: list, company) -> dict | None:
         """
         Direct AI call — bypasses AIClient's JSON-only mode.
-        Tries Anthropic first (if ANTHROPIC_API_KEY is set), then OpenAI.
-        Errors are logged at ERROR level so they appear in Django logs.
+        Tries RAG pipeline first, then Anthropic, then OpenAI.
+        Errors are logged so they appear in Django logs.
         """
         from django.conf import settings
+
+        if getattr(settings, "AI_RAG_ENABLED", False):
+            latest_user_message = next(
+                (m["content"] for m in reversed(messages) if m["role"] == "user"),
+                "",
+            )
+
+            if latest_user_message:
+                try:
+                    from .services.rag_service import RagService
+
+                    rag_result = RagService().run(latest_user_message, company, system_prompt)
+                    if rag_result and rag_result.get("answer"):
+                        return rag_result
+                except Exception as exc:
+                    logger.debug("[AIChatView] RAG pipeline unavailable or failed: %s", exc)
 
         anthropic_key = getattr(settings, "ANTHROPIC_API_KEY", "").strip()
         openai_key    = getattr(settings, "OPENAI_API_KEY", "").strip()

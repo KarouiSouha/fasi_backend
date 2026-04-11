@@ -350,9 +350,19 @@ SPECTACULAR_SETTINGS = {
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # =============================================================================
-# OpenAI
+# OpenAI / AI RAG
 # =============================================================================
 
 OPENAI_API_KEY = env("OPENAI_API_KEY", default="")
 AI_MODEL_SMART = env("AI_MODEL_SMART", default="gpt-4o")
 AI_MODEL_FAST  = env("AI_MODEL_FAST",  default="gpt-4o-mini")
+OPENAI_EMBEDDING_MODEL = env("OPENAI_EMBEDDING_MODEL", default="text-embedding-3-small")
+AI_RAG_MAX_RESPONSE_TOKENS = env.int("AI_RAG_MAX_RESPONSE_TOKENS", default=600)
+AI_RAG_ENABLED = env.bool("AI_RAG_ENABLED", default=True)
+
+# Qdrant vector store
+QDRANT_URL = env("QDRANT_URL", default="")
+QDRANT_API_KEY = env("QDRANT_API_KEY", default="")
+QDRANT_COLLECTION_NAME = env("QDRANT_COLLECTION_NAME", default="weeg_documents")
+QDRANT_DISTANCE = env("QDRANT_DISTANCE", default="cosine")
+OPENAI_EMBEDDING_DIM = env.int("OPENAI_EMBEDDING_DIM", default=1536)
