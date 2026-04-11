@@ -3,12 +3,10 @@ apps/ai_insights/chat_views.py
 ================================
 AI Decision Advisor — POST /api/ai-insights/chat/
 
-v2.0 — Decision-making mode:
-  - Richer system prompt that drives structured decision conversations
-  - Customer names included in context (managers need them to act)
-  - AI returns: answer + suggested_followups + decision_card (optional)
-  - Conversation modes: general | decision | action_plan
-  - Max 30 messages history, 900 output tokens
+v3.0 — Support multi-société :
+  - _get_authorized_companies() récupère toutes les sociétés de l'utilisateur
+  - companies passé à RagService → DirectAnswerService
+  - Questions groupe (total groupe, comparaison sociétés) supportées
 """
 
 import json
@@ -54,16 +52,15 @@ def _conversation_title_from_text(text: str) -> str:
     return cleaned[:120]
 
 
-class AIConversationListCreateView(APIView):
-    """GET/POST conversation sessions for current user/company."""
+# ── Conversations list/create ─────────────────────────────────────────────────
 
+class AIConversationListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         company, err = _require_company(request)
         if err:
             return err
-
         conversations = (
             AIConversation.objects
             .filter(company=company, user=request.user)
@@ -76,37 +73,37 @@ class AIConversationListCreateView(APIView):
         company, err = _require_company(request)
         if err:
             return err
-
         serializer = AIConversationCreateSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
         conversation = AIConversation.objects.create(
             company=company,
             user=request.user,
             title=(serializer.validated_data.get("title") or "").strip()[:255],
         )
-        return Response(AIConversationSerializer(conversation).data, status=status.HTTP_201_CREATED)
+        return Response(
+            AIConversationSerializer(conversation).data,
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class AIConversationMessagesView(APIView):
-    """GET message history for one conversation."""
-
     permission_classes = [IsAuthenticated]
 
     def get(self, request, conversation_id):
         company, err = _require_company(request)
         if err:
             return err
-
         conversation = (
             AIConversation.objects
             .filter(id=conversation_id, company=company, user=request.user)
             .first()
         )
         if not conversation:
-            return Response({"error": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
-
+            return Response(
+                {"error": "Conversation not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
         messages = conversation.messages.order_by("created_at")
         data = AIConversationMessageSerializer(messages, many=True).data
         return Response({
@@ -172,15 +169,23 @@ Respond in {language}.
 
 class BusinessContextBuilder:
     """
-    Builds a rich text context from all analyzer caches.
-    Includes customer names for managers (needed for decisions).
+    Construit un contexte textuel riche depuis tous les caches des analyzers.
+    Inclut les noms de clients pour les managers (nécessaires pour les décisions).
+    Supporte le multi-société.
     """
 
-    def build(self, company, user_role: str = "manager") -> str:
+    def build(self, company, user_role: str = "manager", companies: list = None) -> str:
         lines = []
+        # Info multi-société
+        if companies and len(companies) > 1:
+            lines.append(
+                f"[COMPANIES] User has access to {len(companies)} companies: "
+                + ", ".join(c.name for c in companies[:10])
+            )
+
         self._add_credit_context(company, lines)
         self._add_critical_context(company, lines, user_role)
-        self._add_churn_context(company, lines, include_names=True)
+        self._add_churn_context(company, lines)
         self._add_stock_context(company, lines)
         self._add_forecast_context(company, lines)
         self._add_seasonal_context(company, lines)
@@ -188,38 +193,44 @@ class BusinessContextBuilder:
         self._add_sales_context(company, lines)
 
         if not lines:
-            lines.append("No cached data — ask the manager to refresh the dashboards first.")
+            lines.append(
+                "No cached data — ask the manager to refresh the dashboards first."
+            )
         return "\n".join(lines)
 
     def _add_credit_context(self, company, lines):
-        """Read from KPI credit module directly."""
         try:
             from apps.aging.models import AgingReceivable, AgingSnapshot
             from django.db.models import Sum, Q
             from django.db.models.functions import Coalesce
             from decimal import Decimal
 
-            snap = AgingSnapshot.objects.filter(company=company).order_by("-uploaded_at").first()
+            snap = (
+                AgingSnapshot.objects
+                .filter(company=company)
+                .order_by("-uploaded_at")
+                .first()
+            )
             if not snap:
                 return
             qs = AgingReceivable.objects.filter(snapshot=snap)
-            ag = qs.aggregate(total=Coalesce(Sum("total"), Decimal("0")),
-                              current=Coalesce(Sum("current"), Decimal("0")))
-            grand = float(ag["total"])
-            curr  = float(ag["current"])
+            ag = qs.aggregate(
+                total=Coalesce(Sum("total"), Decimal("0")),
+                current=Coalesce(Sum("current"), Decimal("0")),
+            )
+            grand   = float(ag["total"])
+            curr    = float(ag["current"])
             overdue = max(0, grand - curr)
             or_pct  = round(overdue / grand * 100, 1) if grand > 0 else 0
 
-            # Top 5 overdue accounts (with real names)
             top_overdue = list(
                 qs.filter(total__gt=0).order_by("-total")
                 .values("account", "account_code", "total", "current")[:5]
             )
-
             lines.append(
                 f"[RECEIVABLES] Total: {grand:,.0f} LYD | "
                 f"Overdue: {overdue:,.0f} LYD ({or_pct}%) | "
-                f"Current: {curr:,.0f} LYD | Snapshot: {snap.uploaded_at.date()}"
+                f"Snapshot: {snap.uploaded_at.date()}"
             )
             for r in top_overdue:
                 rec_overdue = max(0, float(r["total"]) - float(r["current"]))
@@ -237,42 +248,49 @@ class BusinessContextBuilder:
         if not data:
             return
         lines.append(
-            f"[CRITICAL SITUATIONS] Risk: {data.get('risk_level','?').upper()} | "
+            f"[CRITICAL] Risk: {data.get('risk_level','?').upper()} | "
             f"{data.get('critical_count',0)} critical | "
-            f"Total exposure: {data.get('total_exposure_lyd',0):,.0f} LYD"
+            f"Exposure: {data.get('total_exposure_lyd',0):,.0f} LYD"
         )
         briefing = data.get("executive_briefing", "")
         if briefing:
             lines.append(f"  Summary: {briefing[:300]}")
         for s in (data.get("situations") or [])[:4]:
-            name = s.get("customer_name") or s.get("account_name") or s.get("product_name") or ""
+            name = (
+                s.get("customer_name") or
+                s.get("account_name") or
+                s.get("product_name") or ""
+            )
             name_part = f" — {name}" if name else ""
             lines.append(
                 f"  · [{s['source'].upper()}]{name_part}: {s['title']} | "
                 f"{s.get('financial_exposure_lyd',0):,.0f} LYD | "
                 f"Act in {s.get('urgency_hours','?')}h"
             )
-        # Causal clusters
         for c in (data.get("causal_clusters") or [])[:2]:
-            lines.append(f"  ⚡ CLUSTER: {c['cluster_name']} — {c['common_cause'][:100]}")
+            lines.append(
+                f"  ⚡ CLUSTER: {c['cluster_name']} — "
+                f"{c['common_cause'][:100]}"
+            )
 
-    def _add_churn_context(self, company, lines, include_names=True):
+    def _add_churn_context(self, company, lines):
         data = cache.get(_cache_key("churn", str(company.id), n=20, ai=1))
         if not data:
             return
         s = data.get("summary", {})
         lines.append(
-            f"[CHURN RISK] Critical: {s.get('critical',0)} | High: {s.get('high',0)} | "
-            f"Medium: {s.get('medium',0)} | Avg score: {s.get('avg_churn_score',0)*100:.0f}%"
+            f"[CHURN] Critical: {s.get('critical',0)} | "
+            f"High: {s.get('high',0)} | "
+            f"Avg score: {s.get('avg_churn_score',0)*100:.0f}%"
         )
         for p in (data.get("predictions") or [])[:6]:
             if p.get("churn_label") in ("critical", "high"):
                 name = p.get("customer_name") or p.get("account_code") or "Unknown"
                 lines.append(
-                    f"  · {name}: "
-                    f"score {p['churn_score']*100:.0f}% [{p['churn_label'].upper()}] | "
+                    f"  · {name}: score {p['churn_score']*100:.0f}% "
+                    f"[{p['churn_label'].upper()}] | "
                     f"Inactive {p.get('days_since_last_purchase','?')}d | "
-                    f"Revenue {p.get('avg_monthly_revenue_lyd',0):,.0f} LYD/mo"
+                    f"{p.get('avg_monthly_revenue_lyd',0):,.0f} LYD/mo"
                 )
 
     def _add_stock_context(self, company, lines):
@@ -285,14 +303,17 @@ class BusinessContextBuilder:
             f"Immediate reorders: {s.get('immediate_reorders',0)} | "
             f"Soon: {s.get('soon_reorders',0)}"
         )
-        urgent = [i for i in (data.get("items") or []) if i.get("urgency") in ("immediate","soon")][:5]
+        urgent = [
+            i for i in (data.get("items") or [])
+            if i.get("urgency") in ("immediate", "soon")
+        ][:5]
         for item in urgent:
             days = item.get("estimated_days_to_stockout")
             lines.append(
                 f"  · [{item['abc_class']}] {item['product_name'][:40]}: "
                 f"stock={item['current_stock']:.0f} | "
                 f"{'STOCKOUT' if not days else f'{days:.0f}d left'} | "
-                f"EOQ={item['eoq']} | source={item.get('stock_source','est')}"
+                f"EOQ={item['eoq']}"
             )
 
     def _add_forecast_context(self, company, lines):
@@ -302,20 +323,16 @@ class BusinessContextBuilder:
         tm = data.get("trend_model", {})
         fc = data.get("revenue_forecast", [])
         lines.append(
-            f"[FORECAST] Model: {data.get('model_type','HW')} | "
-            f"Trend: {tm.get('direction','?')} ({(tm.get('slope_pct') or 0):+.2f}%/mo) | "
+            f"[FORECAST] Trend: {tm.get('direction','?')} "
+            f"({(tm.get('slope_pct') or 0):+.2f}%/mo) | "
             f"MAPE: {tm.get('mape','-')}% | "
             f"3-mo base: {data.get('forecast_total_base_lyd',0):,.0f} LYD"
         )
         for m in fc[:3]:
             lines.append(
-                f"  · {m['period']}: expected {m.get('p50_lyd') or m['base_lyd']:,.0f} | "
-                f"best {m.get('p90_lyd') or m['optimistic_lyd']:,.0f} | "
-                f"worst {m.get('p10_lyd') or m['pessimistic_lyd']:,.0f} LYD"
+                f"  · {m['period']}: "
+                f"expected {m.get('p50_lyd') or m['base_lyd']:,.0f} LYD"
             )
-        cf = data.get("cash_flow_forecast", {})
-        if cf.get("collection_rate_pct"):
-            lines.append(f"  Cash collection rate: {cf['collection_rate_pct']:.0f}%")
 
     def _add_seasonal_context(self, company, lines):
         data = cache.get(_cache_key("seasonal", str(company.id), ai=1))
@@ -326,9 +343,6 @@ class BusinessContextBuilder:
             f"Peak months: {', '.join(data.get('peak_month_names',[]) or ['N/A'])} | "
             f"{'⚠ PEAK INCOMING' if data.get('upcoming_peak_alert') else 'No peak imminent'}"
         )
-        ram = data.get("ramadan_analysis", {})
-        if ram.get("detected"):
-            lines.append(f"  Ramadan effect: {ram.get('dominant_effect','?')} (index={ram.get('avg_ramadan_index',1):.2f})")
 
     def _add_anomaly_context(self, company, lines):
         data = cache.get(_cache_key("anomaly", str(company.id), ai=1))
@@ -339,41 +353,43 @@ class BusinessContextBuilder:
             return
         lines.append(
             f"[ANOMALIES] {s.get('critical',0)} critical | "
-            f"{s.get('high',0)} high | {s.get('medium',0)} medium — last 12 months"
+            f"{s.get('high',0)} high — last 12 months"
         )
         for a in (data.get("anomalies") or [])[:3]:
-            if a.get("severity") in ("critical","high"):
+            if a.get("severity") in ("critical", "high"):
                 lines.append(
                     f"  · {a['date']} — {a['stream'].replace('_',' ')}: "
-                    f"{a['direction']} {abs(a['deviation_pct']):.0f}% vs average "
+                    f"{a['direction']} {abs(a['deviation_pct']):.0f}% "
                     f"[{a['severity'].upper()}]"
                 )
 
     def _add_sales_context(self, company, lines):
-        """Read live sales data for current month."""
         try:
             from apps.transactions.models import MaterialMovement
             from django.db.models import Sum, Count, Q
-            from datetime import timedelta
 
-            today = date.today()
-            m_start = today.replace(day=1)
+            today     = date.today()
+            m_start   = today.replace(day=1)
             ytd_start = date(today.year, 1, 1)
 
-            base = MaterialMovement.objects.filter(company=company, movement_type="ف بيع")
-            mtd  = base.filter(movement_date__gte=m_start).aggregate(rev=Sum("total_out"), txns=Count("id"))
-            ytd  = base.filter(movement_date__gte=ytd_start).aggregate(rev=Sum("total_out"))
-
+            base = MaterialMovement.objects.filter(
+                company=company, movement_type="ف بيع"
+            )
+            mtd = base.filter(movement_date__gte=m_start).aggregate(
+                rev=Sum("total_out"), txns=Count("id")
+            )
+            ytd = base.filter(movement_date__gte=ytd_start).aggregate(
+                rev=Sum("total_out")
+            )
             mtd_rev  = float(mtd["rev"] or 0)
             ytd_rev  = float(ytd["rev"] or 0)
             mtd_txns = mtd["txns"] or 0
 
             lines.append(
-                f"[SALES LIVE] MTD ({today.strftime('%b %Y')}): {mtd_rev:,.0f} LYD "
-                f"({mtd_txns} transactions) | YTD: {ytd_rev:,.0f} LYD"
+                f"[SALES LIVE] MTD ({today.strftime('%b %Y')}): "
+                f"{mtd_rev:,.0f} LYD ({mtd_txns} transactions) | "
+                f"YTD: {ytd_rev:,.0f} LYD"
             )
-
-            # Top 3 customers this month
             top = (
                 base.filter(movement_date__gte=m_start)
                 .exclude(Q(customer_name__isnull=True) | Q(customer_name=""))
@@ -382,36 +398,24 @@ class BusinessContextBuilder:
                 .order_by("-rev")[:3]
             )
             for c in top:
-                lines.append(f"  · {c['customer_name']}: {float(c['rev']):,.0f} LYD this month")
-
+                lines.append(
+                    f"  · {c['customer_name']}: {float(c['rev']):,.0f} LYD this month"
+                )
         except Exception as exc:
             logger.debug("[Chat] sales context failed: %s", exc)
 
 
-# ── Main view ─────────────────────────────────────────────────────────────────
+# ── Main chat view ────────────────────────────────────────────────────────────
 
 class AIChatView(APIView):
     """
     POST /api/ai-insights/chat/
 
-        Request body:
+    Body:
     {
       "messages": [{"role": "user"|"assistant", "content": "..."}],
-            "conversation_id": "<uuid optional>",
-      "mode": "general" | "decision" | "action_plan",
+      "conversation_id": "<uuid optional>",
       "language": "en" | "fr" | "ar"
-    }
-
-    Response:
-    {
-            "conversation_id": "<uuid>",
-      "answer": "...",
-      "decision_needed": true|false,
-      "decision_card": {...} | null,
-      "suggested_followups": ["...", "..."],
-      "urgency": "high",
-      "topic": "credit",
-      "fallback": false
     }
     """
     permission_classes = [IsAuthenticated]
@@ -425,9 +429,12 @@ class AIChatView(APIView):
         if err:
             return err
 
-        messages = request.data.get("messages", [])
+        # ── Récupérer toutes les sociétés autorisées ──────────────────────────
+        companies = self._get_authorized_companies(request.user)
+
+        messages        = request.data.get("messages", [])
         conversation_id = request.data.get("conversation_id")
-        language = request.data.get("language", "English")
+        language        = request.data.get("language", "English")
 
         conversation = None
         if conversation_id:
@@ -442,13 +449,13 @@ class AIChatView(APIView):
         if not messages:
             return Response({"error": "messages is required."}, status=400)
 
-        # Trim incoming history
         messages = messages[-self.MAX_HISTORY:]
 
-        # Build live context
+        # Contexte business avec info multi-société
         context = BusinessContextBuilder().build(
             company,
-            user_role=getattr(request.user, "role", "manager") or "manager"
+            user_role=getattr(request.user, "role", "manager") or "manager",
+            companies=companies,
         )
         if len(context) > self.MAX_CONTEXT_LEN:
             context = context[:self.MAX_CONTEXT_LEN] + "\n[context truncated]"
@@ -459,7 +466,6 @@ class AIChatView(APIView):
             language=language,
         )
 
-        # Convert incoming payload to API format
         api_messages = []
         for m in messages:
             role    = m.get("role", "user")
@@ -478,10 +484,10 @@ class AIChatView(APIView):
         if not latest_user_message:
             return Response({"error": "A user message is required."}, status=400)
 
-        # When conversation exists, use DB history to keep continuity server-side.
         if conversation:
             persisted_history = list(
-                conversation.messages.order_by("created_at").values("role", "content")
+                conversation.messages.order_by("created_at")
+                .values("role", "content")
             )
             persisted_history = persisted_history[-(self.MAX_HISTORY - 1):]
             api_messages = [
@@ -505,9 +511,28 @@ class AIChatView(APIView):
             metadata={},
         )
 
-        # Call AI via RAG-enhanced pipeline first. via RAG-enhanced pipeline first.
+        # ── RAG pipeline avec support multi-société ───────────────────────────
         try:
-            reply = self._call_ai(system_prompt, api_messages, company)
+            from django.conf import settings
+            if getattr(settings, "AI_RAG_ENABLED", False):
+                try:
+                    from .services.rag_service import RagService
+                    rag_result = RagService().run(
+                        latest_user_message,
+                        company,
+                        context,
+                        companies=companies,   # ← multi-société
+                    )
+                    if rag_result and rag_result.get("answer"):
+                        reply = rag_result
+                    else:
+                        reply = self._call_ai(system_prompt, api_messages, company)
+                except Exception as exc:
+                    logger.debug("[AIChatView] RAG failed: %s", exc)
+                    reply = self._call_ai(system_prompt, api_messages, company)
+            else:
+                reply = self._call_ai(system_prompt, api_messages, company)
+
             if reply:
                 with transaction.atomic():
                     AIConversationMessage.objects.create(
@@ -515,74 +540,95 @@ class AIChatView(APIView):
                         role=AIConversationMessage.Role.ASSISTANT,
                         content=reply.get("answer", ""),
                         metadata={
-                            "decision_needed": bool(reply.get("decision_needed", False)),
-                            "decision_card": reply.get("decision_card"),
+                            "decision_needed":   bool(reply.get("decision_needed", False)),
+                            "decision_card":     reply.get("decision_card"),
                             "suggested_followups": reply.get("suggested_followups", []),
-                            "urgency": reply.get("urgency", "medium"),
-                            "topic": reply.get("topic", "general"),
-                            "fallback": False,
-                            "reply_to": str(user_message_obj.id),
+                            "urgency":           reply.get("urgency", "medium"),
+                            "topic":             reply.get("topic", "general"),
+                            "fallback":          False,
+                            "reply_to":          str(user_message_obj.id),
                         },
                     )
                     conversation.save()
-
-                return Response({"conversation_id": str(conversation.id), **reply, "fallback": False})
+                return Response({
+                    "conversation_id": str(conversation.id),
+                    **reply,
+                    "fallback": False,
+                })
         except Exception as exc:
-            logger.error("[AIChatView] AI call failed for company=%s: %s", company.id, exc)
+            logger.error(
+                "[AIChatView] AI call failed company=%s: %s", company.id, exc
+            )
 
-        # Fallback
-        fallback = self._build_fallback(api_messages[-1].get("content", ""), context)
+        # ── Fallback ──────────────────────────────────────────────────────────
+        fallback = self._build_fallback(latest_user_message, context)
         with transaction.atomic():
             AIConversationMessage.objects.create(
                 conversation=conversation,
                 role=AIConversationMessage.Role.ASSISTANT,
                 content=fallback.get("answer", ""),
                 metadata={
-                    "decision_needed": bool(fallback.get("decision_needed", False)),
-                    "decision_card": fallback.get("decision_card"),
+                    "decision_needed":   bool(fallback.get("decision_needed", False)),
+                    "decision_card":     fallback.get("decision_card"),
                     "suggested_followups": fallback.get("suggested_followups", []),
-                    "urgency": fallback.get("urgency", "medium"),
-                    "topic": fallback.get("topic", "general"),
-                    "fallback": True,
-                    "reply_to": str(user_message_obj.id),
+                    "urgency":           fallback.get("urgency", "medium"),
+                    "topic":             fallback.get("topic", "general"),
+                    "fallback":          True,
+                    "reply_to":          str(user_message_obj.id),
                 },
             )
             conversation.save()
+        return Response({
+            "conversation_id": str(conversation.id),
+            **fallback,
+            "fallback": True,
+        })
 
-        return Response({"conversation_id": str(conversation.id), **fallback, "fallback": True})
+    # ── Sociétés autorisées ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _get_authorized_companies(user) -> list:
+        """
+        Retourne toutes les sociétés auxquelles l'utilisateur a accès.
+
+        Logique :
+          1. Superuser / staff → toutes les sociétés
+          2. Relation user.companies (ManyToMany) → ses sociétés
+          3. Fallback → sa seule société (user.company)
+        """
+        from apps.companies.models import Company
+
+        try:
+            if user.is_superuser or getattr(user, "is_staff", False):
+                return list(Company.objects.all())
+
+            # ManyToMany "companies" si défini sur le modèle User
+            if hasattr(user, "companies"):
+                cos = list(user.companies.all())
+                if cos:
+                    return cos
+        except Exception as exc:
+            logger.debug("[AIChatView] _get_authorized_companies: %s", exc)
+
+        # Fallback : société unique
+        if getattr(user, "company", None):
+            return [user.company]
+
+        return []
+
+    # ── Appel LLM ─────────────────────────────────────────────────────────────
 
     def _call_ai(self, system_prompt: str, messages: list, company) -> dict | None:
-        """
-        Direct AI call — bypasses AIClient's JSON-only mode.
-        Tries RAG pipeline first, then Anthropic, then OpenAI.
-        Errors are logged so they appear in Django logs.
-        """
         from django.conf import settings
-
-        if getattr(settings, "AI_RAG_ENABLED", False):
-            latest_user_message = next(
-                (m["content"] for m in reversed(messages) if m["role"] == "user"),
-                "",
-            )
-
-            if latest_user_message:
-                try:
-                    from .services.rag_service import RagService
-
-                    rag_result = RagService().run(latest_user_message, company, system_prompt)
-                    if rag_result and rag_result.get("answer"):
-                        return rag_result
-                except Exception as exc:
-                    logger.debug("[AIChatView] RAG pipeline unavailable or failed: %s", exc)
 
         anthropic_key = getattr(settings, "ANTHROPIC_API_KEY", "").strip()
         openai_key    = getattr(settings, "OPENAI_API_KEY", "").strip()
 
-        # ── Try Anthropic ──────────────────────────────────────────────────────
+        # Anthropic
         if anthropic_key:
             try:
-                import anthropic as _anthropic_lib
-                client = _anthropic_lib.Anthropic(api_key=anthropic_key)
+                import anthropic as _a
+                client = _a.Anthropic(api_key=anthropic_key)
                 model  = getattr(settings, "AI_MODEL_SMART", "claude-haiku-4-5-20251001")
                 resp   = client.messages.create(
                     model=model,
@@ -591,21 +637,23 @@ class AIChatView(APIView):
                     messages=messages,
                 )
                 raw = resp.content[0].text if resp.content else ""
-                logger.info("[AIChatView] Anthropic OK — company=%s model=%s tokens=%d",
-                            company.id, model,
-                            (resp.usage.input_tokens or 0) + (resp.usage.output_tokens or 0))
+                logger.info(
+                    "[AIChatView] Anthropic OK company=%s model=%s tokens=%d",
+                    company.id, model,
+                    (resp.usage.input_tokens or 0) + (resp.usage.output_tokens or 0),
+                )
                 self._log_usage(company, resp.usage)
                 return self._parse_response(raw)
             except ImportError:
-                logger.error("[AIChatView] 'anthropic' package not installed — run: pip install anthropic")
+                logger.error("[AIChatView] anthropic package not installed")
             except Exception as exc:
-                logger.error("[AIChatView] Anthropic call FAILED company=%s: %s", company.id, exc)
+                logger.error("[AIChatView] Anthropic failed company=%s: %s", company.id, exc)
 
-        # ── Try OpenAI ─────────────────────────────────────────────────────────
+        # OpenAI
         if openai_key:
             try:
-                import openai as _openai_lib
-                client = _openai_lib.OpenAI(api_key=openai_key)
+                import openai as _o
+                client = _o.OpenAI(api_key=openai_key)
                 model  = getattr(settings, "AI_MODEL_SMART", "gpt-4o-mini")
                 msgs   = [{"role": "system", "content": system_prompt}] + messages
                 resp   = client.chat.completions.create(
@@ -616,28 +664,32 @@ class AIChatView(APIView):
                     response_format={"type": "json_object"},
                 )
                 raw = resp.choices[0].message.content if resp.choices else ""
-                logger.info("[AIChatView] OpenAI OK — company=%s model=%s tokens=%d",
-                            company.id, model, resp.usage.total_tokens if resp.usage else 0)
+                logger.info(
+                    "[AIChatView] OpenAI OK company=%s model=%s tokens=%d",
+                    company.id, model,
+                    resp.usage.total_tokens if resp.usage else 0,
+                )
                 return self._parse_response(raw)
             except ImportError:
-                logger.error("[AIChatView] 'openai' package not installed — run: pip install openai")
+                logger.error("[AIChatView] openai package not installed")
             except Exception as exc:
-                logger.error("[AIChatView] OpenAI call FAILED company=%s: %s", company.id, exc)
+                logger.error("[AIChatView] OpenAI failed company=%s: %s", company.id, exc)
 
-        # ── No provider configured ─────────────────────────────────────────────
         logger.error(
-            "[AIChatView] No AI provider available for company=%s. "
-            "Set ANTHROPIC_API_KEY or OPENAI_API_KEY in Django settings.",
+            "[AIChatView] No AI provider available company=%s. "
+            "Set ANTHROPIC_API_KEY or OPENAI_API_KEY.",
             company.id,
         )
         return None
 
     @staticmethod
     def _log_usage(company, usage) -> None:
-        """Log token usage to AIUsageLog (non-blocking)."""
         try:
             from apps.ai_insights.models import AIUsageLog
-            tokens = (getattr(usage, "input_tokens", 0) or 0) + (getattr(usage, "output_tokens", 0) or 0)
+            tokens = (
+                (getattr(usage, "input_tokens", 0) or 0) +
+                (getattr(usage, "output_tokens", 0) or 0)
+            )
             AIUsageLog.objects.create(
                 analyzer="chat",
                 model="decision_advisor",
@@ -650,9 +702,7 @@ class AIChatView(APIView):
 
     @staticmethod
     def _parse_response(raw: str) -> dict:
-        """Parse AI JSON response with graceful fallback."""
         try:
-            # Strip markdown fences if present
             clean = raw.strip()
             if clean.startswith("```"):
                 clean = clean.split("```")[1]
@@ -660,66 +710,82 @@ class AIChatView(APIView):
                     clean = clean[4:]
             data = json.loads(clean.strip())
             return {
-                "answer":            data.get("answer", raw),
-                "decision_needed":   bool(data.get("decision_needed", False)),
-                "decision_card":     data.get("decision_card"),
+                "answer":              data.get("answer", raw),
+                "decision_needed":     bool(data.get("decision_needed", False)),
+                "decision_card":       data.get("decision_card"),
                 "suggested_followups": data.get("suggested_followups", [])[:3],
-                "urgency":           data.get("urgency", "medium"),
-                "topic":             data.get("topic", "general"),
+                "urgency":             data.get("urgency", "medium"),
+                "topic":               data.get("topic", "general"),
             }
         except (json.JSONDecodeError, AttributeError):
-            # Plain text fallback
             return {
-                "answer":            raw,
-                "decision_needed":   False,
-                "decision_card":     None,
+                "answer":              raw,
+                "decision_needed":     False,
+                "decision_card":       None,
                 "suggested_followups": [],
-                "urgency":           "medium",
-                "topic":             "general",
+                "urgency":             "medium",
+                "topic":               "general",
             }
 
     @staticmethod
     def _build_fallback(question: str, context: str) -> dict:
-        """Rule-based fallback when AI is unavailable."""
-        q_lower = question.lower()
-
-        if any(k in q_lower for k in ["risk", "critical", "urgent", "immediate"]):
-            answer = ("Based on your data: check the critical situations panel for the top urgent items. "
-                      "Focus on any items with urgency 'immediate' — these need action today.")
-            followups = ["Which stock items need emergency reorder?",
-                         "Which customers should I call first?",
-                         "What is my total financial exposure right now?"]
-        elif any(k in q_lower for k in ["churn", "customer", "inactive", "contact"]):
-            answer = ("Review your churn risk panel for customers scored 'critical' or 'high'. "
-                      "These are customers with the longest inactivity and highest revenue at risk.")
-            followups = ["What is the revenue at risk from churning customers?",
-                         "How do I prioritize my outreach calls?",
-                         "Which customers are most profitable?"]
-        elif any(k in q_lower for k in ["stock", "reorder", "inventory", "rupture"]):
-            answer = ("Check your stock optimizer panel for items with urgency 'immediate'. "
-                      "Class A items approaching stockout are your highest priority.")
-            followups = ["What is the EOQ for my top SKUs?",
-                         "Which products are completely out of stock?",
-                         "How much revenue am I losing to stockouts?"]
-        elif any(k in q_lower for k in ["forecast", "predict", "revenue", "prévision"]):
-            answer = ("Your 3-month forecast is available in the Forecast panel. "
-                      "Check the P10/P50/P90 range to understand your confidence interval.")
-            followups = ["What is my cash flow projection for next month?",
-                         "What is the main risk to my forecast?",
-                         "How does this compare to last year?"]
+        q = question.lower()
+        if any(k in q for k in ["risk", "critical", "urgent"]):
+            answer = (
+                "Check the critical situations panel for urgent items. "
+                "Focus on 'immediate' urgency — action needed today."
+            )
+            followups = [
+                "Which stock items need emergency reorder?",
+                "Which customers should I call first?",
+                "What is my total financial exposure?",
+            ]
+        elif any(k in q for k in ["churn", "customer", "inactive"]):
+            answer = (
+                "Review your churn risk panel for 'critical' or 'high' customers. "
+                "These have the longest inactivity and highest revenue at risk."
+            )
+            followups = [
+                "What is the revenue at risk from churning customers?",
+                "How do I prioritize outreach calls?",
+                "Which customers are most profitable?",
+            ]
+        elif any(k in q for k in ["stock", "reorder", "inventory"]):
+            answer = (
+                "Check your stock optimizer for 'immediate' urgency items. "
+                "Class A items approaching stockout are highest priority."
+            )
+            followups = [
+                "What is the EOQ for my top SKUs?",
+                "Which products are completely out of stock?",
+                "How much revenue am I losing to stockouts?",
+            ]
+        elif any(k in q for k in ["forecast", "predict", "revenue"]):
+            answer = (
+                "Your 3-month forecast is in the Forecast panel. "
+                "Check P10/P50/P90 range for confidence interval."
+            )
+            followups = [
+                "What is my cash flow projection for next month?",
+                "What is the main risk to my forecast?",
+                "How does this compare to last year?",
+            ]
         else:
-            answer = ("I'm temporarily unavailable for AI analysis. "
-                      "Please check your dashboard panels for the latest KPIs, "
-                      "critical situations, and recommendations.")
-            followups = ["What are my top business risks?",
-                         "Which customers need urgent attention?",
-                         "What is my revenue outlook?"]
+            answer = (
+                "AI analysis temporarily unavailable. "
+                "Please check your dashboard panels for the latest KPIs."
+            )
+            followups = [
+                "What are my top business risks?",
+                "Which customers need urgent attention?",
+                "What is my revenue outlook?",
+            ]
 
         return {
-            "answer":            answer,
-            "decision_needed":   False,
-            "decision_card":     None,
+            "answer":              answer,
+            "decision_needed":     False,
+            "decision_card":       None,
             "suggested_followups": followups,
-            "urgency":           "medium",
-            "topic":             "general",
+            "urgency":             "medium",
+            "topic":               "general",
         }

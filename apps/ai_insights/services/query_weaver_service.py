@@ -17,7 +17,7 @@ class QueryWeaverService:
     PRODUCT_TOKEN_PATTERN = re.compile(r"[\w\u0600-\u06FF]+", re.UNICODE)
 
     DATE_PATTERN = re.compile(r"(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})")
-    YEAR_PATTERN = re.compile(r"(20\d{2})")
+    YEAR_PATTERN = re.compile(r"\b(20\d{2})\b")
 
     def parse_product_name(self, text, company=None):
         text_lower = text.lower()
@@ -154,7 +154,19 @@ class QueryWeaverService:
         ]
 
     def parse_date_range(self, text):
+        """
+        Parse a date range from natural language text.
+
+        Priority order:
+          1. Explicit DD/MM/YYYY ranges (two dates)
+          2. "today" / "aujourd'hui"
+          3. Month + optional year  (e.g. "January 2026", "janvier 2025")
+          4. Bare year              (e.g. "in 2026", "2025")  ← NEW
+          5. "this month", "year to date / ytd"
+        """
         text_lower = (text or "").lower()
+
+        # 1. Two explicit dates
         dates = self.DATE_PATTERN.findall(text_lower)
         if len(dates) >= 2:
             start = self._parse_date(dates[0])
@@ -162,22 +174,33 @@ class QueryWeaverService:
             if start and end:
                 return start, end
 
+        # 2. "today"
         if "today" in text_lower or "aujourd'hui" in text_lower or "todays" in text_lower:
             end = date.today()
         else:
             end = None
 
+        # 3. Month name (with optional year)
         for token, month in self.MONTHS.items():
             if token in text_lower:
                 year = self._extract_year(text_lower) or date.today().year
                 start = date(year, month, 1)
-                end = date(year, month, 28)
                 return start, self._end_of_month(start)
 
-        if "january" in text_lower or "janvier" in text_lower:
-            year = self._extract_year(text_lower) or date.today().year
-            return date(year, 1, 1), date(year, 1, 31)
+        # 4. Bare year like "in 2026" or "for 2025" or just "2026"
+        year_match = self.YEAR_PATTERN.search(text_lower)
+        if year_match:
+            year = int(year_match.group(1))
+            today = date.today()
+            year_start = date(year, 1, 1)
+            # If the requested year is current or future, cap end at today
+            if year >= today.year:
+                year_end = today
+            else:
+                year_end = date(year, 12, 31)
+            return year_start, year_end
 
+        # 5. Relative ranges
         if "this month" in text_lower or "ce mois" in text_lower:
             today = date.today()
             return date(today.year, today.month, 1), today
