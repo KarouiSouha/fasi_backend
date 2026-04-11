@@ -109,7 +109,7 @@ class AIUsageLog(models.Model):
     model = models.CharField(
         max_length=100,
         verbose_name="AI Model",
-        help_text="e.g. gpt-4o-mini, claude-haiku-4-5-20251001",
+        help_text="e.g. gpt-4o-mini",
     )
 
     tokens_used = models.IntegerField(default=0, verbose_name="Tokens Used")

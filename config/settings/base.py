@@ -366,3 +366,4 @@ QDRANT_API_KEY = env("QDRANT_API_KEY", default="")
 QDRANT_COLLECTION_NAME = env("QDRANT_COLLECTION_NAME", default="weeg_documents")
 QDRANT_DISTANCE = env("QDRANT_DISTANCE", default="cosine")
 OPENAI_EMBEDDING_DIM = env.int("OPENAI_EMBEDDING_DIM", default=1536)
+

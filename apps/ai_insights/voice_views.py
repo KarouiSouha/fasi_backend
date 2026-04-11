@@ -264,7 +264,6 @@ class ExplainDecisionView(APIView):
         context_snapshot = context_snapshot[:3000]
 
         openai_key    = getattr(settings, "OPENAI_API_KEY", "").strip()
-        anthropic_key = getattr(settings, "ANTHROPIC_API_KEY", "").strip()
 
         user_prompt = (
             f"=== THE ANSWER I GAVE ===\n{answer}\n\n"
@@ -273,7 +272,7 @@ class ExplainDecisionView(APIView):
         )
 
         result = self._call_ai(
-            openai_key, anthropic_key, user_prompt, str(company.id)
+            openai_key, user_prompt, str(company.id)
         )
 
         if not result:
@@ -285,7 +284,7 @@ class ExplainDecisionView(APIView):
     # ─────────────────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _call_ai(openai_key, anthropic_key, user_prompt, company_id) -> dict | None:
+    def _call_ai(openai_key, user_prompt, company_id) -> dict | None:
         import json, re
 
         def extract_json(raw):
@@ -299,22 +298,6 @@ class ExplainDecisionView(APIView):
                     except Exception:
                         pass
             return None
-
-        # Try Anthropic first
-        if anthropic_key:
-            try:
-                import anthropic as _a
-                client = _a.Anthropic(api_key=anthropic_key)
-                model  = getattr(settings, "AI_MODEL_SMART", "claude-haiku-4-5-20251001")
-                resp   = client.messages.create(
-                    model=model, max_tokens=900,
-                    system=EXPLAIN_SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": user_prompt}],
-                )
-                raw = resp.content[0].text if resp.content else ""
-                return extract_json(raw)
-            except Exception as exc:
-                logger.warning("[ExplainDecision] Anthropic failed: %s", exc)
 
         # Fall back to OpenAI
         if openai_key:

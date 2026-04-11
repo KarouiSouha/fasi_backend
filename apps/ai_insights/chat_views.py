@@ -621,33 +621,7 @@ class AIChatView(APIView):
     def _call_ai(self, system_prompt: str, messages: list, company) -> dict | None:
         from django.conf import settings
 
-        anthropic_key = getattr(settings, "ANTHROPIC_API_KEY", "").strip()
         openai_key    = getattr(settings, "OPENAI_API_KEY", "").strip()
-
-        # Anthropic
-        if anthropic_key:
-            try:
-                import anthropic as _a
-                client = _a.Anthropic(api_key=anthropic_key)
-                model  = getattr(settings, "AI_MODEL_SMART", "claude-haiku-4-5-20251001")
-                resp   = client.messages.create(
-                    model=model,
-                    max_tokens=self.MAX_TOKENS,
-                    system=system_prompt,
-                    messages=messages,
-                )
-                raw = resp.content[0].text if resp.content else ""
-                logger.info(
-                    "[AIChatView] Anthropic OK company=%s model=%s tokens=%d",
-                    company.id, model,
-                    (resp.usage.input_tokens or 0) + (resp.usage.output_tokens or 0),
-                )
-                self._log_usage(company, resp.usage)
-                return self._parse_response(raw)
-            except ImportError:
-                logger.error("[AIChatView] anthropic package not installed")
-            except Exception as exc:
-                logger.error("[AIChatView] Anthropic failed company=%s: %s", company.id, exc)
 
         # OpenAI
         if openai_key:
@@ -677,7 +651,7 @@ class AIChatView(APIView):
 
         logger.error(
             "[AIChatView] No AI provider available company=%s. "
-            "Set ANTHROPIC_API_KEY or OPENAI_API_KEY.",
+            "Set OPENAI_API_KEY.",
             company.id,
         )
         return None

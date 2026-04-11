@@ -1,9 +1,11 @@
 import logging
 from datetime import date
-
+import time
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
+
+BATCH_SIZE = 20  
 
 
 class ExcelVectorIngestService:
@@ -34,7 +36,10 @@ class ExcelVectorIngestService:
             return
 
         from apps.transactions.models import MaterialMovement
-        query = MaterialMovement.objects.filter(company=company, movement_type__icontains="بيع")
+        query = MaterialMovement.objects.filter(
+            company=company,
+            movement_type__icontains="بيع"
+        )
         if date_range and len(date_range) == 2 and date_range[0] and date_range[1]:
             query = query.filter(
                 movement_date__gte=date_range[0],
@@ -45,34 +50,69 @@ class ExcelVectorIngestService:
             past_year = date(today.year - 1, today.month, today.day)
             query = query.filter(movement_date__gte=past_year)
 
-        rows = query.order_by("movement_date")[:2000]
+        rows = list(query.order_by("movement_date")[:2000])
         if not rows:
+            logger.info("[ExcelVectorIngestService] No movements to index.")
             return
 
-        texts = [self.build_row_text(m) for m in rows]
-        try:
-            vectors = self.openai.embed_texts(texts)
-        except Exception as exc:
-            logger.warning("[ExcelVectorIngestService] Embedding failed: %s", exc)
-            return
+        logger.info(
+            "[ExcelVectorIngestService] Indexing %d movements in batches of %d...",
+            len(rows), BATCH_SIZE
+        )
 
-        points = []
-        for movement, vector, text in zip(rows, vectors, texts):
-            points.append({
-                "id": str(movement.id),
-                "vector": vector,
-                "payload": {
-                    "company_id": str(company.id),
-                    "movement_date": movement.movement_date.isoformat(),
-                    "material_name": movement.material_name,
-                    "material_code": movement.material_code,
-                    "movement_type": movement.movement_type,
-                    "text": text,
-                },
-            })
+        total_indexed = 0
 
-        try:
-            self.qdrant.upsert_documents(points)
-            logger.info("[ExcelVectorIngestService] Indexed %d movement rows into Qdrant.", len(points))
-        except Exception as exc:
-            logger.warning("[ExcelVectorIngestService] Qdrant upsert failed: %s", exc)
+        # ── Traitement par lots ───────────────────────────────────────────────
+        for batch_start in range(0, len(rows), BATCH_SIZE):
+            batch = rows[batch_start: batch_start + BATCH_SIZE]
+            texts = [self.build_row_text(m) for m in batch]
+
+            # Embeddings
+            try:
+                vectors = self.openai.embed_texts(texts)
+            except Exception as exc:
+                logger.warning(
+                    "[ExcelVectorIngestService] Embedding failed batch %d: %s",
+                    batch_start, exc
+                )
+                continue
+
+            # Construction des points Qdrant
+            points = []
+            for movement, vector, text in zip(batch, vectors, texts):
+                points.append({
+                    "id":     str(movement.id),
+                    "vector": vector,
+                    "payload": {
+                        "company_id":    str(company.id),
+                        "movement_date": movement.movement_date.isoformat(),
+                        "material_name": movement.material_name,
+                        "material_code": movement.material_code,
+                        "movement_type": movement.movement_type,
+                        "text":          text,
+                    },
+                })
+
+            # Upsert dans Qdrant
+            try:
+                self.qdrant.upsert_documents(points)
+                total_indexed += len(points)
+                time.sleep(0.5)
+                logger.info(
+                    "[ExcelVectorIngestService] Batch %d/%d indexé (%d vecteurs)",
+                    batch_start // BATCH_SIZE + 1,
+                    (len(rows) - 1) // BATCH_SIZE + 1,
+                    len(points),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[ExcelVectorIngestService] Qdrant upsert failed batch %d: %s",
+                    batch_start, exc
+                )
+                continue
+
+        logger.info(
+            "[ExcelVectorIngestService] ✅ Indexation terminée: %d/%d mouvements indexés dans Qdrant.",
+            total_indexed, len(rows)
+        )
+        
