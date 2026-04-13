@@ -1,12 +1,13 @@
 """
-apps/ai_insights/chat_views.py
-================================
-AI Decision Advisor — POST /api/ai-insights/chat/
-
-v3.0 — Support multi-société :
-  - _get_authorized_companies() récupère toutes les sociétés de l'utilisateur
-  - companies passé à RagService → DirectAnswerService
-  - Questions groupe (total groupe, comparaison sociétés) supportées
+apps/ai_insights/chat_views.py — BusinessContextBuilder enrichi
+===============================================================
+Modifications :
+  - _add_aging_detail_context   : top débiteurs avec buckets d'ancienneté
+  - _add_inventory_context      : stock par branche, ruptures, valeur totale
+  - _add_customers_context      : top clients actifs, codes comptes
+  - _add_branches_context       : liste des succursales actives
+  - _add_movements_context      : TOUS les types de mouvements (pas seulement ventes)
+  - _add_sales_context          : conservé pour compatibilité (MTD/YTD live)
 """
 
 import json
@@ -169,28 +170,34 @@ Respond in {language}.
 
 class BusinessContextBuilder:
     """
-    Construit un contexte textuel riche depuis tous les caches des analyzers.
-    Inclut les noms de clients pour les managers (nécessaires pour les décisions).
-    Supporte le multi-société.
+    Construit un contexte textuel riche depuis toutes les sources de données.
+    Couvre : ventes, créances, stock, clients, succursales, mouvements, AI caches.
     """
 
     def build(self, company, user_role: str = "manager", companies: list = None) -> str:
         lines = []
-        # Info multi-société
+
         if companies and len(companies) > 1:
             lines.append(
                 f"[COMPANIES] User has access to {len(companies)} companies: "
                 + ", ".join(c.name for c in companies[:10])
             )
 
-        self._add_credit_context(company, lines)
+        # ── Sources de données directes (DB) ──────────────────────────────────
+        self._add_sales_context(company, lines)
+        self._add_movements_context(company, lines)
+        self._add_aging_detail_context(company, lines)
+        self._add_inventory_context(company, lines)
+        self._add_customers_context(company, lines)
+        self._add_branches_context(company, lines)
+
+        # ── Caches des analyzers AI ────────────────────────────────────────────
         self._add_critical_context(company, lines, user_role)
         self._add_churn_context(company, lines)
         self._add_stock_context(company, lines)
         self._add_forecast_context(company, lines)
         self._add_seasonal_context(company, lines)
         self._add_anomaly_context(company, lines)
-        self._add_sales_context(company, lines)
 
         if not lines:
             lines.append(
@@ -198,7 +205,92 @@ class BusinessContextBuilder:
             )
         return "\n".join(lines)
 
-    def _add_credit_context(self, company, lines):
+    # ── VENTES LIVE (MTD / YTD) ───────────────────────────────────────────────
+
+    def _add_sales_context(self, company, lines):
+        try:
+            from apps.transactions.models import MaterialMovement
+            from django.db.models import Sum, Count, Q
+
+            today     = date.today()
+            m_start   = today.replace(day=1)
+            ytd_start = date(today.year, 1, 1)
+
+            base = MaterialMovement.objects.filter(
+                company=company, movement_type="ف بيع"
+            )
+            mtd = base.filter(movement_date__gte=m_start).aggregate(
+                rev=Sum("total_out"), txns=Count("id")
+            )
+            ytd = base.filter(movement_date__gte=ytd_start).aggregate(
+                rev=Sum("total_out")
+            )
+            mtd_rev  = float(mtd["rev"] or 0)
+            ytd_rev  = float(ytd["rev"] or 0)
+            mtd_txns = mtd["txns"] or 0
+
+            lines.append(
+                f"[SALES LIVE] MTD ({today.strftime('%b %Y')}): "
+                f"{mtd_rev:,.0f} LYD ({mtd_txns} transactions) | "
+                f"YTD: {ytd_rev:,.0f} LYD"
+            )
+            top = (
+                base.filter(movement_date__gte=m_start)
+                .exclude(Q(customer_name__isnull=True) | Q(customer_name=""))
+                .values("customer_name")
+                .annotate(rev=Sum("total_out"))
+                .order_by("-rev")[:3]
+            )
+            for c in top:
+                lines.append(
+                    f"  · {c['customer_name']}: {float(c['rev']):,.0f} LYD this month"
+                )
+        except Exception as exc:
+            logger.debug("[Chat] sales context failed: %s", exc)
+
+    # ── TOUS LES MOUVEMENTS (pas seulement ventes) ────────────────────────────
+
+    def _add_movements_context(self, company, lines):
+        try:
+            from apps.transactions.models import MaterialMovement
+            from django.db.models import Sum, Count
+
+            today     = date.today()
+            m_start   = today.replace(day=1)
+
+            # Résumé par type de mouvement ce mois
+            by_type = (
+                MaterialMovement.objects
+                .filter(company=company, movement_date__gte=m_start)
+                .exclude(movement_type__isnull=True)
+                .values("movement_type")
+                .annotate(
+                    total_in=Sum("total_in"),
+                    total_out=Sum("total_out"),
+                    count=Count("id"),
+                )
+                .order_by("-count")[:8]
+            )
+
+            if not by_type:
+                return
+
+            lines.append(f"[MOVEMENTS MTD] Breakdown by type ({today.strftime('%b %Y')}):")
+            for row in by_type:
+                mv_type  = row["movement_type"] or "N/A"
+                t_in     = float(row["total_in"] or 0)
+                t_out    = float(row["total_out"] or 0)
+                count    = row["count"] or 0
+                lines.append(
+                    f"  · {mv_type}: {count} transactions | "
+                    f"IN={t_in:,.0f} LYD | OUT={t_out:,.0f} LYD"
+                )
+        except Exception as exc:
+            logger.debug("[Chat] movements context failed: %s", exc)
+
+    # ── CRÉANCES DÉTAILLÉES ────────────────────────────────────────────────────
+
+    def _add_aging_detail_context(self, company, lines):
         try:
             from apps.aging.models import AgingReceivable, AgingSnapshot
             from django.db.models import Sum, Q
@@ -213,6 +305,7 @@ class BusinessContextBuilder:
             )
             if not snap:
                 return
+
             qs = AgingReceivable.objects.filter(snapshot=snap)
             ag = qs.aggregate(
                 total=Coalesce(Sum("total"), Decimal("0")),
@@ -223,25 +316,147 @@ class BusinessContextBuilder:
             overdue = max(0, grand - curr)
             or_pct  = round(overdue / grand * 100, 1) if grand > 0 else 0
 
-            top_overdue = list(
-                qs.filter(total__gt=0).order_by("-total")
-                .values("account", "account_code", "total", "current")[:5]
-            )
             lines.append(
                 f"[RECEIVABLES] Total: {grand:,.0f} LYD | "
                 f"Overdue: {overdue:,.0f} LYD ({or_pct}%) | "
-                f"Snapshot: {snap.uploaded_at.date()}"
+                f"Snapshot: {snap.uploaded_at.date()} | Year: {snap.aging_year}"
+            )
+
+            # Top 5 débiteurs avec détail
+            top_overdue = list(
+                qs.filter(total__gt=0)
+                .order_by("-total")
+                .values("account", "account_code", "total", "current",
+                        "d61_90", "d91_120", "over_330", "risk_score")[:5]
             )
             for r in top_overdue:
                 rec_overdue = max(0, float(r["total"]) - float(r["current"]))
                 if rec_overdue > 0:
                     lines.append(
-                        f"  · {r['account'][:60]}: "
-                        f"{float(r['total']):,.0f} LYD total, "
-                        f"{rec_overdue:,.0f} LYD overdue"
+                        f"  · {r['account'][:50]} ({r['account_code']}): "
+                        f"{float(r['total']):,.0f} LYD total | "
+                        f"{rec_overdue:,.0f} LYD overdue | "
+                        f"Risk: {r['risk_score'] or 'unknown'}"
                     )
         except Exception as exc:
-            logger.debug("[Chat] credit context failed: %s", exc)
+            logger.debug("[Chat] aging detail context failed: %s", exc)
+
+    # ── INVENTAIRE ────────────────────────────────────────────────────────────
+
+    def _add_inventory_context(self, company, lines):
+        try:
+            from apps.inventory.models import InventorySnapshotLine
+            from django.db.models import Sum, Count
+            from django.db.models.functions import Coalesce
+            from decimal import Decimal
+
+            inv_qs = InventorySnapshotLine.objects.filter(company=company)
+            if not inv_qs.exists():
+                return
+
+            agg = inv_qs.aggregate(
+                total_qty=Coalesce(Sum("quantity"), Decimal("0")),
+                total_value=Coalesce(Sum("line_value"), Decimal("0")),
+                total_products=Count("product_code", distinct=True),
+            )
+
+            zero_stock = inv_qs.filter(quantity=0).count()
+            total_lines = inv_qs.count()
+
+            lines.append(
+                f"[INVENTORY] Products: {agg['total_products']} SKUs | "
+                f"Total qty: {float(agg['total_qty']):,.0f} units | "
+                f"Total value: {float(agg['total_value']):,.0f} LYD | "
+                f"Zero stock: {zero_stock} SKUs"
+            )
+
+            # Top 5 produits par valeur
+            top_products = (
+                inv_qs
+                .values("product_name", "product_code")
+                .annotate(
+                    total_qty=Coalesce(Sum("quantity"), Decimal("0")),
+                    total_value=Coalesce(Sum("line_value"), Decimal("0")),
+                )
+                .order_by("-total_value")[:5]
+            )
+            for p in top_products:
+                lines.append(
+                    f"  · {(p['product_name'] or p['product_code'] or 'N/A')[:40]}: "
+                    f"{float(p['total_qty']):,.0f} units | "
+                    f"{float(p['total_value']):,.0f} LYD"
+                )
+
+            # Branches avec stock
+            branches_with_stock = (
+                inv_qs.filter(quantity__gt=0)
+                .values("branch_name")
+                .annotate(value=Coalesce(Sum("line_value"), Decimal("0")))
+                .order_by("-value")[:5]
+            )
+            if branches_with_stock:
+                branch_summary = " | ".join(
+                    f"{b['branch_name']}: {float(b['value']):,.0f} LYD"
+                    for b in branches_with_stock
+                )
+                lines.append(f"  Branches stock value: {branch_summary}")
+
+        except Exception as exc:
+            logger.debug("[Chat] inventory context failed: %s", exc)
+
+    # ── CLIENTS ───────────────────────────────────────────────────────────────
+
+    def _add_customers_context(self, company, lines):
+        try:
+            from apps.customers.models import Customer
+
+            total_active = Customer.objects.filter(company=company, is_active=True).count()
+            total_all    = Customer.objects.filter(company=company).count()
+
+            if total_all == 0:
+                return
+
+            lines.append(
+                f"[CUSTOMERS] Total: {total_all} | Active: {total_active} | "
+                f"Inactive: {total_all - total_active}"
+            )
+
+            # Échantillon de clients récents
+            recent = list(
+                Customer.objects.filter(company=company, is_active=True)
+                .order_by("-id")
+                .values("name", "account_code", "area_code")[:5]
+            )
+            for c in recent:
+                lines.append(
+                    f"  · {c['name'][:40]} | Code: {c['account_code'] or 'N/A'} | "
+                    f"Area: {c['area_code'] or 'N/A'}"
+                )
+        except Exception as exc:
+            logger.debug("[Chat] customers context failed: %s", exc)
+
+    # ── SUCCURSALES ───────────────────────────────────────────────────────────
+
+    def _add_branches_context(self, company, lines):
+        try:
+            from apps.branches.models import Branch
+
+            branches = list(
+                Branch.objects.filter(is_active=True)
+                .values("name", "address", "phone")[:10]
+            )
+            if not branches:
+                return
+
+            lines.append(f"[BRANCHES] Active branches: {len(branches)}")
+            for b in branches:
+                lines.append(
+                    f"  · {b['name']} | {b['address'] or 'N/A'} | {b['phone'] or 'N/A'}"
+                )
+        except Exception as exc:
+            logger.debug("[Chat] branches context failed: %s", exc)
+
+    # ── CACHES ANALYZERS AI ───────────────────────────────────────────────────
 
     def _add_critical_context(self, company, lines, user_role):
         data = cache.get(_cache_key("critical", str(company.id), ai=1))
@@ -299,7 +514,7 @@ class BusinessContextBuilder:
             return
         s = data.get("summary", {})
         lines.append(
-            f"[STOCK] Class A: {s.get('class_a_count',0)} SKUs | "
+            f"[STOCK AI] Class A: {s.get('class_a_count',0)} SKUs | "
             f"Immediate reorders: {s.get('immediate_reorders',0)} | "
             f"Soon: {s.get('soon_reorders',0)}"
         )
@@ -345,7 +560,7 @@ class BusinessContextBuilder:
         )
 
     def _add_anomaly_context(self, company, lines):
-        data = cache.get(_cache_key("anomaly", str(company.id), ai=1))
+        data = cache.get(_cache_key("anomalies", str(company.id), ai=1))
         if not data:
             return
         s = data.get("summary", {})
@@ -362,47 +577,6 @@ class BusinessContextBuilder:
                     f"{a['direction']} {abs(a['deviation_pct']):.0f}% "
                     f"[{a['severity'].upper()}]"
                 )
-
-    def _add_sales_context(self, company, lines):
-        try:
-            from apps.transactions.models import MaterialMovement
-            from django.db.models import Sum, Count, Q
-
-            today     = date.today()
-            m_start   = today.replace(day=1)
-            ytd_start = date(today.year, 1, 1)
-
-            base = MaterialMovement.objects.filter(
-                company=company, movement_type="ف بيع"
-            )
-            mtd = base.filter(movement_date__gte=m_start).aggregate(
-                rev=Sum("total_out"), txns=Count("id")
-            )
-            ytd = base.filter(movement_date__gte=ytd_start).aggregate(
-                rev=Sum("total_out")
-            )
-            mtd_rev  = float(mtd["rev"] or 0)
-            ytd_rev  = float(ytd["rev"] or 0)
-            mtd_txns = mtd["txns"] or 0
-
-            lines.append(
-                f"[SALES LIVE] MTD ({today.strftime('%b %Y')}): "
-                f"{mtd_rev:,.0f} LYD ({mtd_txns} transactions) | "
-                f"YTD: {ytd_rev:,.0f} LYD"
-            )
-            top = (
-                base.filter(movement_date__gte=m_start)
-                .exclude(Q(customer_name__isnull=True) | Q(customer_name=""))
-                .values("customer_name")
-                .annotate(rev=Sum("total_out"))
-                .order_by("-rev")[:3]
-            )
-            for c in top:
-                lines.append(
-                    f"  · {c['customer_name']}: {float(c['rev']):,.0f} LYD this month"
-                )
-        except Exception as exc:
-            logger.debug("[Chat] sales context failed: %s", exc)
 
 
 # ── Main chat view ────────────────────────────────────────────────────────────
@@ -422,14 +596,13 @@ class AIChatView(APIView):
 
     MAX_HISTORY     = 30
     MAX_TOKENS      = 900
-    MAX_CONTEXT_LEN = 3500
+    MAX_CONTEXT_LEN = 4000
 
     def post(self, request):
         company, err = _require_company(request)
         if err:
             return err
 
-        # ── Récupérer toutes les sociétés autorisées ──────────────────────────
         companies = self._get_authorized_companies(request.user)
 
         messages        = request.data.get("messages", [])
@@ -451,7 +624,6 @@ class AIChatView(APIView):
 
         messages = messages[-self.MAX_HISTORY:]
 
-        # Contexte business avec info multi-société
         context = BusinessContextBuilder().build(
             company,
             user_role=getattr(request.user, "role", "manager") or "manager",
@@ -511,7 +683,6 @@ class AIChatView(APIView):
             metadata={},
         )
 
-        # ── RAG pipeline avec support multi-société ───────────────────────────
         try:
             from django.conf import settings
             if getattr(settings, "AI_RAG_ENABLED", False):
@@ -521,7 +692,7 @@ class AIChatView(APIView):
                         latest_user_message,
                         company,
                         context,
-                        companies=companies,   # ← multi-société
+                        companies=companies,
                     )
                     if rag_result and rag_result.get("answer"):
                         reply = rag_result
@@ -540,13 +711,13 @@ class AIChatView(APIView):
                         role=AIConversationMessage.Role.ASSISTANT,
                         content=reply.get("answer", ""),
                         metadata={
-                            "decision_needed":   bool(reply.get("decision_needed", False)),
-                            "decision_card":     reply.get("decision_card"),
+                            "decision_needed":     bool(reply.get("decision_needed", False)),
+                            "decision_card":       reply.get("decision_card"),
                             "suggested_followups": reply.get("suggested_followups", []),
-                            "urgency":           reply.get("urgency", "medium"),
-                            "topic":             reply.get("topic", "general"),
-                            "fallback":          False,
-                            "reply_to":          str(user_message_obj.id),
+                            "urgency":             reply.get("urgency", "medium"),
+                            "topic":               reply.get("topic", "general"),
+                            "fallback":            False,
+                            "reply_to":            str(user_message_obj.id),
                         },
                     )
                     conversation.save()
@@ -556,11 +727,8 @@ class AIChatView(APIView):
                     "fallback": False,
                 })
         except Exception as exc:
-            logger.error(
-                "[AIChatView] AI call failed company=%s: %s", company.id, exc
-            )
+            logger.error("[AIChatView] AI call failed company=%s: %s", company.id, exc)
 
-        # ── Fallback ──────────────────────────────────────────────────────────
         fallback = self._build_fallback(latest_user_message, context)
         with transaction.atomic():
             AIConversationMessage.objects.create(
@@ -568,13 +736,13 @@ class AIChatView(APIView):
                 role=AIConversationMessage.Role.ASSISTANT,
                 content=fallback.get("answer", ""),
                 metadata={
-                    "decision_needed":   bool(fallback.get("decision_needed", False)),
-                    "decision_card":     fallback.get("decision_card"),
+                    "decision_needed":     bool(fallback.get("decision_needed", False)),
+                    "decision_card":       fallback.get("decision_card"),
                     "suggested_followups": fallback.get("suggested_followups", []),
-                    "urgency":           fallback.get("urgency", "medium"),
-                    "topic":             fallback.get("topic", "general"),
-                    "fallback":          True,
-                    "reply_to":          str(user_message_obj.id),
+                    "urgency":             fallback.get("urgency", "medium"),
+                    "topic":               fallback.get("topic", "general"),
+                    "fallback":            True,
+                    "reply_to":            str(user_message_obj.id),
                 },
             )
             conversation.save()
@@ -584,46 +752,47 @@ class AIChatView(APIView):
             "fallback": True,
         })
 
-    # ── Sociétés autorisées ───────────────────────────────────────────────────
-
     @staticmethod
     def _get_authorized_companies(user) -> list:
-        """
-        Retourne toutes les sociétés auxquelles l'utilisateur a accès.
-
-        Logique :
-          1. Superuser / staff → toutes les sociétés
-          2. Relation user.companies (ManyToMany) → ses sociétés
-          3. Fallback → sa seule société (user.company)
-        """
         from apps.companies.models import Company
-
         try:
             if user.is_superuser or getattr(user, "is_staff", False):
                 return list(Company.objects.all())
-
-            # ManyToMany "companies" si défini sur le modèle User
             if hasattr(user, "companies"):
                 cos = list(user.companies.all())
                 if cos:
                     return cos
         except Exception as exc:
             logger.debug("[AIChatView] _get_authorized_companies: %s", exc)
-
-        # Fallback : société unique
         if getattr(user, "company", None):
             return [user.company]
-
         return []
-
-    # ── Appel LLM ─────────────────────────────────────────────────────────────
 
     def _call_ai(self, system_prompt: str, messages: list, company) -> dict | None:
         from django.conf import settings
 
+        anthropic_key = getattr(settings, "ANTHROPIC_API_KEY", "").strip()
         openai_key    = getattr(settings, "OPENAI_API_KEY", "").strip()
 
-        # OpenAI
+        if anthropic_key:
+            try:
+                import anthropic as _a
+                client = _a.Anthropic(api_key=anthropic_key)
+                model  = getattr(settings, "AI_MODEL_SMART", "claude-haiku-4-5-20251001")
+                resp   = client.messages.create(
+                    model=model,
+                    max_tokens=self.MAX_TOKENS,
+                    system=system_prompt,
+                    messages=messages,
+                )
+                raw = resp.content[0].text if resp.content else ""
+                self._log_usage(company, resp.usage)
+                return self._parse_response(raw)
+            except ImportError:
+                logger.error("[AIChatView] anthropic package not installed")
+            except Exception as exc:
+                logger.error("[AIChatView] Anthropic failed company=%s: %s", company.id, exc)
+
         if openai_key:
             try:
                 import openai as _o
@@ -638,22 +807,12 @@ class AIChatView(APIView):
                     response_format={"type": "json_object"},
                 )
                 raw = resp.choices[0].message.content if resp.choices else ""
-                logger.info(
-                    "[AIChatView] OpenAI OK company=%s model=%s tokens=%d",
-                    company.id, model,
-                    resp.usage.total_tokens if resp.usage else 0,
-                )
                 return self._parse_response(raw)
             except ImportError:
                 logger.error("[AIChatView] openai package not installed")
             except Exception as exc:
                 logger.error("[AIChatView] OpenAI failed company=%s: %s", company.id, exc)
 
-        logger.error(
-            "[AIChatView] No AI provider available company=%s. "
-            "Set OPENAI_API_KEY.",
-            company.id,
-        )
         return None
 
     @staticmethod
@@ -704,56 +863,27 @@ class AIChatView(APIView):
     @staticmethod
     def _build_fallback(question: str, context: str) -> dict:
         q = question.lower()
-        if any(k in q for k in ["risk", "critical", "urgent"]):
-            answer = (
-                "Check the critical situations panel for urgent items. "
-                "Focus on 'immediate' urgency — action needed today."
-            )
-            followups = [
-                "Which stock items need emergency reorder?",
-                "Which customers should I call first?",
-                "What is my total financial exposure?",
-            ]
-        elif any(k in q for k in ["churn", "customer", "inactive"]):
-            answer = (
-                "Review your churn risk panel for 'critical' or 'high' customers. "
-                "These have the longest inactivity and highest revenue at risk."
-            )
-            followups = [
-                "What is the revenue at risk from churning customers?",
-                "How do I prioritize outreach calls?",
-                "Which customers are most profitable?",
-            ]
-        elif any(k in q for k in ["stock", "reorder", "inventory"]):
-            answer = (
-                "Check your stock optimizer for 'immediate' urgency items. "
-                "Class A items approaching stockout are highest priority."
-            )
-            followups = [
-                "What is the EOQ for my top SKUs?",
-                "Which products are completely out of stock?",
-                "How much revenue am I losing to stockouts?",
-            ]
-        elif any(k in q for k in ["forecast", "predict", "revenue"]):
-            answer = (
-                "Your 3-month forecast is in the Forecast panel. "
-                "Check P10/P50/P90 range for confidence interval."
-            )
-            followups = [
-                "What is my cash flow projection for next month?",
-                "What is the main risk to my forecast?",
-                "How does this compare to last year?",
-            ]
+        if any(k in q for k in ["aging", "créance", "overdue", "receivable"]):
+            answer = "Check the receivables panel. Focus on accounts with >60% overdue ratio."
+            followups = ["Which accounts are most overdue?", "What is the total overdue amount?", "Who are the top 5 debtors?"]
+        elif any(k in q for k in ["inventory", "stock", "جرد"]):
+            answer = "Check the inventory panel for current stock levels by branch and product."
+            followups = ["Which products are out of stock?", "What is the total inventory value?", "Which branch has the most stock?"]
+        elif any(k in q for k in ["customer", "client", "عميل"]):
+            answer = "Review the customers panel for active accounts and contact details."
+            followups = ["How many active customers do we have?", "Which customers are at churn risk?", "Who are the top revenue customers?"]
+        elif any(k in q for k in ["branch", "فرع", "succursale"]):
+            answer = "Check the branches panel for all active locations and their performance."
+            followups = ["How many branches are active?", "Which branch has the highest sales?", "Which branch needs restocking?"]
+        elif any(k in q for k in ["movement", "mouvement", "حركة", "purchase", "achat", "transfer"]):
+            answer = "All movement types (sales, purchases, transfers) are available in the transactions panel."
+            followups = ["What are the total purchases this month?", "Show me all movement types.", "What is the stock balance after movements?"]
+        elif any(k in q for k in ["risk", "critical", "urgent"]):
+            answer = "Check the critical situations panel for urgent items requiring immediate action."
+            followups = ["Which stock items need emergency reorder?", "Which customers should I call first?", "What is my total financial exposure?"]
         else:
-            answer = (
-                "AI analysis temporarily unavailable. "
-                "Please check your dashboard panels for the latest KPIs."
-            )
-            followups = [
-                "What are my top business risks?",
-                "Which customers need urgent attention?",
-                "What is my revenue outlook?",
-            ]
+            answer = "AI analysis temporarily unavailable. Please check your dashboard panels for the latest KPIs."
+            followups = ["What are my top business risks?", "Which customers need urgent attention?", "What is my revenue outlook?"]
 
         return {
             "answer":              answer,

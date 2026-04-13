@@ -1,16 +1,37 @@
+"""
+apps/data_import/services/excel_vector_ingest.py
+-------------------------------------------------
+Universal Vector Ingest Service — tous les types de fichiers Excel.
+
+Supporte :
+  - movements   : TOUS les types (ventes, achats, transferts, ajustements...)
+  - aging       : créances par bucket d'ancienneté
+  - inventory   : stocks par produit et par branche
+  - customers   : profil client + code compte
+  - branches    : liste des succursales
+
+Architecture :
+  - Un builder de texte par type de fichier (_build_*_text)
+  - Traitement par lots de 20 pour éviter les timeouts Qdrant Cloud
+  - Pause de 0.5s entre lots pour stabilité réseau
+  - Extensible : ajouter un nouveau type = ajouter une méthode _build_*_text
+"""
+
 import logging
-from datetime import date
 import time
-from django.conf import settings
+from datetime import date
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 20  
+BATCH_SIZE = 20
 
 
 class ExcelVectorIngestService:
+
     def __init__(self):
-        from apps.ai_insights.services.qdrant_service import QdrantService, QdrantServiceUnavailable
+        from apps.ai_insights.services.qdrant_service import (
+            QdrantService, QdrantServiceUnavailable
+        )
         from apps.ai_insights.services.openai_service import OpenAIService
 
         self.openai = OpenAIService()
@@ -18,28 +39,53 @@ class ExcelVectorIngestService:
             self.qdrant = QdrantService()
         except QdrantServiceUnavailable as exc:
             self.qdrant = None
-            logger.warning("[ExcelVectorIngestService] Qdrant unavailable: %s", exc)
+            logger.warning("[VectorIngest] Qdrant unavailable: %s", exc)
 
-    def build_row_text(self, movement):
-        return (
-            f"Date: {movement.movement_date.isoformat()} | "
-            f"Product: {movement.material_name or movement.material_code} | "
-            f"Qty out: {movement.qty_out or 0} | "
-            f"Total out: {movement.total_out or 0} LYD | "
-            f"Type: {movement.movement_type or 'N/A'} | "
-            f"Branch: {movement.branch.name if movement.branch else 'Unknown'} | "
-            f"Customer: {movement.customer_name or 'Unknown'}"
-        )
+    # ── Point d'entrée principal ──────────────────────────────────────────────
 
-    def index_movements(self, company, date_range=None):
+    def ingest(self, company, file_type: str, date_range=None):
+        """
+        Point d'entrée universel — appelé après chaque import Excel.
+
+        Args:
+            company   : instance Company Django
+            file_type : 'movements' | 'aging' | 'inventory' | 'customers' | 'branches'
+            date_range: [date_from, date_to] pour movements uniquement
+        """
         if not self.qdrant:
+            logger.warning("[VectorIngest] Qdrant non disponible — indexation ignorée.")
             return
 
+        dispatcher = {
+            "movements": self._ingest_movements,
+            "aging":     self._ingest_aging,
+            "inventory": self._ingest_inventory,
+            "customers": self._ingest_customers,
+            "branches":  self._ingest_branches,
+        }
+
+        handler = dispatcher.get(file_type)
+        if not handler:
+            logger.warning("[VectorIngest] Type '%s' non supporté.", file_type)
+            return
+
+        logger.info("[VectorIngest] Démarrage indexation type=%s company=%s", file_type, company.id)
+        handler(company, date_range=date_range)
+
+    # ── Méthode de compatibilité ascendante ───────────────────────────────────
+
+    def index_movements(self, company, date_range=None):
+        """Rétrocompatibilité avec l'ancien appel dans views.py."""
+        self.ingest(company, "movements", date_range=date_range)
+
+    # ── MOVEMENTS — TOUS les types de mouvements ──────────────────────────────
+
+    def _ingest_movements(self, company, date_range=None, **kwargs):
         from apps.transactions.models import MaterialMovement
-        query = MaterialMovement.objects.filter(
-            company=company,
-            movement_type__icontains="بيع"
-        )
+
+        # Tous les types de mouvements (pas seulement les ventes)
+        query = MaterialMovement.objects.filter(company=company)
+
         if date_range and len(date_range) == 2 and date_range[0] and date_range[1]:
             query = query.filter(
                 movement_date__gte=date_range[0],
@@ -50,69 +96,271 @@ class ExcelVectorIngestService:
             past_year = date(today.year - 1, today.month, today.day)
             query = query.filter(movement_date__gte=past_year)
 
-        rows = list(query.order_by("movement_date")[:2000])
+        rows = list(query.select_related("branch").order_by("movement_date")[:2000])
         if not rows:
-            logger.info("[ExcelVectorIngestService] No movements to index.")
+            logger.info("[VectorIngest] Aucun mouvement à indexer.")
             return
 
-        logger.info(
-            "[ExcelVectorIngestService] Indexing %d movements in batches of %d...",
-            len(rows), BATCH_SIZE
+        texts = [self._build_movement_text(m) for m in rows]
+        ids   = [str(m.id) for m in rows]
+        payloads = [
+            {
+                "company_id":    str(company.id),
+                "file_type":     "movements",
+                "movement_date": m.movement_date.isoformat(),
+                "movement_type": m.movement_type or "",
+                "material_name": m.material_name or "",
+                "material_code": m.material_code or "",
+                "customer_name": m.customer_name or "",
+                "branch":        m.branch.name if m.branch else "",
+                "qty_in":        float(m.qty_in or 0),
+                "qty_out":       float(m.qty_out or 0),
+                "total_in":      float(m.total_in or 0),
+                "total_out":     float(m.total_out or 0),
+            }
+            for m in rows
+        ]
+        self._batch_upsert(texts, ids, payloads, label="movements")
+
+    @staticmethod
+    def _build_movement_text(m) -> str:
+        direction = "IN" if (m.qty_in and float(m.qty_in) > 0) else "OUT"
+        qty   = float(m.qty_in or 0) if direction == "IN" else float(m.qty_out or 0)
+        total = float(m.total_in or 0) if direction == "IN" else float(m.total_out or 0)
+        return (
+            f"Type: {m.movement_type or 'N/A'} | "
+            f"Date: {m.movement_date.isoformat()} | "
+            f"Direction: {direction} | "
+            f"Product: {m.material_name or m.material_code or 'N/A'} | "
+            f"Code: {m.material_code or ''} | "
+            f"Qty: {qty:.2f} | "
+            f"Amount: {total:.2f} LYD | "
+            f"Branch: {m.branch.name if m.branch else 'N/A'} | "
+            f"Customer: {m.customer_name or 'N/A'}"
         )
 
+    # ── AGING RECEIVABLES ─────────────────────────────────────────────────────
+
+    def _ingest_aging(self, company, **kwargs):
+        from apps.aging.models import AgingReceivable, AgingSnapshot
+
+        snapshot = (
+            AgingSnapshot.objects.filter(company=company)
+            .order_by("-uploaded_at").first()
+        )
+        if not snapshot:
+            logger.info("[VectorIngest] Aucun snapshot aging trouvé.")
+            return
+
+        records = list(AgingReceivable.objects.filter(snapshot=snapshot))
+        if not records:
+            return
+
+        texts    = [self._build_aging_text(r) for r in records]
+        ids      = [f"aging-{r.id}" for r in records]
+        payloads = [
+            {
+                "company_id":    str(company.id),
+                "file_type":     "aging",
+                "snapshot_id":   str(snapshot.id),
+                "aging_year":    snapshot.aging_year,
+                "account":       r.account or "",
+                "account_code":  r.account_code or "",
+                "total":         float(r.total or 0),
+                "current":       float(r.current or 0),
+                "overdue_total": float(r.overdue_total or 0),
+                "risk_score":    r.risk_score or "",
+            }
+            for r in records
+        ]
+        self._batch_upsert(texts, ids, payloads, label="aging")
+
+    @staticmethod
+    def _build_aging_text(r) -> str:
+        total   = float(r.total or 0)
+        current = float(r.current or 0)
+        overdue = float(r.overdue_total or 0)
+        pct     = round(overdue / total * 100, 1) if total > 0 else 0
+        return (
+            f"Account: {r.account or r.account_code or 'N/A'} | "
+            f"Total receivable: {total:,.2f} LYD | "
+            f"Current: {current:,.2f} LYD | "
+            f"Overdue: {overdue:,.2f} LYD ({pct}%) | "
+            f"1-30d: {float(r.d1_30 or 0):,.2f} | "
+            f"31-60d: {float(r.d31_60 or 0):,.2f} | "
+            f"61-90d: {float(r.d61_90 or 0):,.2f} | "
+            f"91-120d: {float(r.d91_120 or 0):,.2f} | "
+            f"Over 330d: {float(r.over_330 or 0):,.2f} | "
+            f"Risk: {r.risk_score or 'unknown'}"
+        )
+
+    # ── INVENTORY ─────────────────────────────────────────────────────────────
+
+    def _ingest_inventory(self, company, **kwargs):
+        from apps.inventory.models import InventorySnapshotLine
+
+        lines = list(
+            InventorySnapshotLine.objects.filter(company=company)
+            .order_by("product_code", "branch_name")[:3000]
+        )
+        if not lines:
+            logger.info("[VectorIngest] Aucune ligne d'inventaire trouvée.")
+            return
+
+        texts    = [self._build_inventory_text(l) for l in lines]
+        ids      = [f"inv-{l.id}" for l in lines]
+        payloads = [
+            {
+                "company_id":       str(company.id),
+                "file_type":        "inventory",
+                "product_code":     l.product_code or "",
+                "product_name":     l.product_name or "",
+                "product_category": l.product_category or "",
+                "branch_name":      l.branch_name or "",
+                "quantity":         float(l.quantity or 0),
+                "unit_cost":        float(l.unit_cost or 0),
+                "line_value":       float(l.line_value or 0),
+                "inventory_year":   l.inventory_year or 0,
+            }
+            for l in lines
+        ]
+        self._batch_upsert(texts, ids, payloads, label="inventory")
+
+    @staticmethod
+    def _build_inventory_text(l) -> str:
+        return (
+            f"Product: {l.product_name or l.product_code or 'N/A'} | "
+            f"Code: {l.product_code or ''} | "
+            f"Category: {l.product_category or 'N/A'} | "
+            f"Branch: {l.branch_name or 'N/A'} | "
+            f"Quantity: {float(l.quantity or 0):,.2f} units | "
+            f"Unit cost: {float(l.unit_cost or 0):,.2f} LYD | "
+            f"Total value: {float(l.line_value or 0):,.2f} LYD | "
+            f"Year: {l.inventory_year or 'N/A'}"
+        )
+
+    # ── CUSTOMERS ─────────────────────────────────────────────────────────────
+
+    def _ingest_customers(self, company, **kwargs):
+        from apps.customers.models import Customer
+
+        customers = list(Customer.objects.filter(company=company, is_active=True)[:1000])
+        if not customers:
+            logger.info("[VectorIngest] Aucun client trouvé.")
+            return
+
+        texts    = [self._build_customer_text(c) for c in customers]
+        ids      = [f"cust-{c.id}" for c in customers]
+        payloads = [
+            {
+                "company_id":   str(company.id),
+                "file_type":    "customers",
+                "customer_id":  str(c.id),
+                "account_code": c.account_code or "",
+                "name":         c.name or "",
+                "area_code":    c.area_code or "",
+                "is_active":    c.is_active,
+            }
+            for c in customers
+        ]
+        self._batch_upsert(texts, ids, payloads, label="customers")
+
+    @staticmethod
+    def _build_customer_text(c) -> str:
+        return (
+            f"Customer: {c.name or 'N/A'} | "
+            f"Account code: {c.account_code or 'N/A'} | "
+            f"Area: {c.area_code or 'N/A'} | "
+            f"Phone: {c.phone or 'N/A'} | "
+            f"Address: {c.address or 'N/A'} | "
+            f"Active: {'Yes' if c.is_active else 'No'}"
+        )
+
+    # ── BRANCHES ──────────────────────────────────────────────────────────────
+
+    def _ingest_branches(self, company, **kwargs):
+        from apps.branches.models import Branch
+
+        branches = list(Branch.objects.filter(is_active=True)[:200])
+        if not branches:
+            logger.info("[VectorIngest] Aucune branche trouvée.")
+            return
+
+        texts    = [self._build_branch_text(b) for b in branches]
+        ids      = [f"branch-{b.id}" for b in branches]
+        payloads = [
+            {
+                "company_id": str(company.id),
+                "file_type":  "branches",
+                "branch_id":  str(b.id),
+                "name":       b.name or "",
+                "address":    b.address or "",
+                "phone":      b.phone or "",
+                "is_active":  b.is_active,
+            }
+            for b in branches
+        ]
+        self._batch_upsert(texts, ids, payloads, label="branches")
+
+    @staticmethod
+    def _build_branch_text(b) -> str:
+        return (
+            f"Branch: {b.name or 'N/A'} | "
+            f"Address: {b.address or 'N/A'} | "
+            f"Phone: {b.phone or 'N/A'} | "
+            f"Active: {'Yes' if b.is_active else 'No'}"
+        )
+
+    # ── Méthode commune d'upsert par lots ─────────────────────────────────────
+
+    def _batch_upsert(self, texts: list, ids: list, payloads: list, label: str):
+        """
+        Envoie les vecteurs vers Qdrant par lots de BATCH_SIZE.
+        Gestion des erreurs par lot — un lot échoué n'arrête pas les suivants.
+        """
         total_indexed = 0
+        total_batches = (len(texts) - 1) // BATCH_SIZE + 1
 
-        # ── Traitement par lots ───────────────────────────────────────────────
-        for batch_start in range(0, len(rows), BATCH_SIZE):
-            batch = rows[batch_start: batch_start + BATCH_SIZE]
-            texts = [self.build_row_text(m) for m in batch]
+        for batch_start in range(0, len(texts), BATCH_SIZE):
+            batch_texts    = texts[batch_start: batch_start + BATCH_SIZE]
+            batch_ids      = ids[batch_start: batch_start + BATCH_SIZE]
+            batch_payloads = payloads[batch_start: batch_start + BATCH_SIZE]
+            batch_num      = batch_start // BATCH_SIZE + 1
 
-            # Embeddings
+            # Génération des embeddings
             try:
-                vectors = self.openai.embed_texts(texts)
+                vectors = self.openai.embed_texts(batch_texts)
             except Exception as exc:
                 logger.warning(
-                    "[ExcelVectorIngestService] Embedding failed batch %d: %s",
-                    batch_start, exc
+                    "[VectorIngest] Embedding échoué batch %d/%d (%s): %s",
+                    batch_num, total_batches, label, exc
                 )
                 continue
 
             # Construction des points Qdrant
-            points = []
-            for movement, vector, text in zip(batch, vectors, texts):
-                points.append({
-                    "id":     str(movement.id),
-                    "vector": vector,
-                    "payload": {
-                        "company_id":    str(company.id),
-                        "movement_date": movement.movement_date.isoformat(),
-                        "material_name": movement.material_name,
-                        "material_code": movement.material_code,
-                        "movement_type": movement.movement_type,
-                        "text":          text,
-                    },
-                })
+            points = [
+                {
+                    "id":      bid,
+                    "vector":  vec,
+                    "payload": {**payload, "text": text},
+                }
+                for bid, vec, text, payload
+                in zip(batch_ids, vectors, batch_texts, batch_payloads)
+            ]
 
             # Upsert dans Qdrant
             try:
                 self.qdrant.upsert_documents(points)
                 total_indexed += len(points)
                 time.sleep(0.5)
-                logger.info(
-                    "[ExcelVectorIngestService] Batch %d/%d indexé (%d vecteurs)",
-                    batch_start // BATCH_SIZE + 1,
-                    (len(rows) - 1) // BATCH_SIZE + 1,
-                    len(points),
-                )
             except Exception as exc:
                 logger.warning(
-                    "[ExcelVectorIngestService] Qdrant upsert failed batch %d: %s",
-                    batch_start, exc
+                    "[VectorIngest] Qdrant upsert échoué batch %d/%d (%s): %s",
+                    batch_num, total_batches, label, exc
                 )
                 continue
 
         logger.info(
-            "[ExcelVectorIngestService] ✅ Indexation terminée: %d/%d mouvements indexés dans Qdrant.",
-            total_indexed, len(rows)
+            "[VectorIngest] ✅ %s — %d/%d documents indexés dans Qdrant.",
+            label, total_indexed, len(texts)
         )
-        
