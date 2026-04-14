@@ -58,7 +58,6 @@ LOCAL_APPS = [
     "apps.transactions",
     "apps.inventory",
     "apps.kpi",
-    "apps.reports",
     "apps.alerts",
     "apps.aging",
     "apps.ai_insights",

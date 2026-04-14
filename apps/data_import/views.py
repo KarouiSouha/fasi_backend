@@ -23,9 +23,85 @@ from rest_framework.views import APIView
 from .models import ImportLog
 from .serializers import ImportLogSerializer, ImportUploadSerializer
 from .parsers.excel_parser import parse_excel_file, detect_file_type
+from .validators import TemplateValidator
 import openpyxl
 
 logger = logging.getLogger(__name__)
+
+
+class ValidateExcelView(APIView):
+    """
+    POST /api/import/validate/
+
+    Validates an Excel file against the template structure WITHOUT importing.
+    Returns detailed validation errors and warnings.
+    
+    Useful for:
+    - Pre-import validation to catch issues early
+    - Previewing validation errors before committing
+    - Testing file compliance
+    
+    Response includes:
+    - Structure errors (header/column issues) - critical, prevent import
+    - Row errors (data validation failures) - per-row details
+    - Warnings (non-blocking observations)
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        file_obj = request.FILES.get("file")
+        file_type = request.data.get("file_type")
+
+        if not file_obj:
+            return Response(
+                {"error": "No file uploaded."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Validate file extension
+        ext = file_obj.name.rsplit(".", 1)[-1].lower()
+        if ext not in ("xlsx", "xls"):
+            return Response(
+                {"error": "Only .xlsx and .xls files are accepted."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            wb = openpyxl.load_workbook(file_obj, read_only=True, data_only=True)
+            ws = wb.active
+            rows = list(ws.iter_rows(values_only=True))
+            wb.close()
+        except Exception as e:
+            return Response(
+                {"error": f"Cannot read Excel file: {str(e)}"},
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+
+        # Auto-detect file type if not provided
+        if not file_type:
+            file_type = detect_file_type(file_obj.name, rows[0] if rows else [])
+            if not file_type:
+                return Response(
+                    {
+                        "error": "Cannot determine file type. Please specify file_type or rename file to include: فروع, العملاء, حركة, جرد, اعمار",
+                        "available_types": ["branches", "customers", "movements", "inventory", "aging"]
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # Validate using template
+        validator = TemplateValidator()
+        result = validator.validate_file(rows, file_type)
+
+        return Response(
+            {
+                "filename": file_obj.name,
+                "validation": result.to_dict(),
+                "can_import": result.is_valid and not result.has_critical_errors,
+            },
+            status=status.HTTP_200_OK if result.is_valid else status.HTTP_422_UNPROCESSABLE_ENTITY,
+        )
 
 
 class ExcelUploadView(APIView):
@@ -60,17 +136,63 @@ class ExcelUploadView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
+        # ─── STEP 1: Read Excel file ─────────────────────────────────
+        try:
+            wb = openpyxl.load_workbook(file_obj, read_only=True, data_only=True)
+            ws = wb.active
+            rows = list(ws.iter_rows(values_only=True))
+            wb.close()
+        except Exception as e:
+            return Response(
+                {
+                    "error": f"Cannot read Excel file: {str(e)}",
+                    "error_code": "FILE_READ_ERROR"
+                },
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+
+        # ─── STEP 2: Detect file type ───────────────────────────────
+        if not file_type_override:
+            file_type_override = detect_file_type(file_obj.name, rows[0] if rows else [])
+            if not file_type_override:
+                return Response(
+                    {
+                        "error": "Cannot determine file type. Rename file to include: فروع, العملاء, حركة, جرد, اعمار",
+                        "error_code": "UNKNOWN_FILE_TYPE"
+                    },
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+
+        # ─── STEP 3: STRICT VALIDATION against template ──────────────
+        validator = TemplateValidator()
+        validation_result = validator.validate_file(rows, file_type_override)
+
+        # If structure validation fails, reject import immediately
+        if validation_result.has_critical_errors:
+            return Response(
+                {
+                    "error": "File structure does not match template. Please fix the errors below and try again.",
+                    "error_code": "VALIDATION_FAILED",
+                    "validation_details": validation_result.to_dict(),
+                },
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+
         # Create import log (pending)
         log = ImportLog.objects.create(
             company=company,
             imported_by=request.user,
-            file_type=file_type_override or "movements",  # Placeholder until detected
+            file_type=file_type_override,
             original_filename=file_obj.name,
             status=ImportLog.ImportStatus.PROCESSING,
-            import_context={},
+            import_context={
+                "validation_warnings": validation_result.warnings,
+                "validation_summary": validation_result.summary,
+            },
         )
 
         try:
+            # ─── STEP 4: Parse and import ──────────────────────────────
             result = parse_excel_file(
                 file_obj=file_obj,
                 filename=file_obj.name,
@@ -128,7 +250,6 @@ class ExcelUploadView(APIView):
             log.completed_at = datetime.now(tz=timezone.utc)
             log.save()
 
-
             if detected_type == "movements":
                 try:
                     from .services.excel_vector_ingest import ExcelVectorIngestService
@@ -180,22 +301,38 @@ class ExcelUploadView(APIView):
 
         except ValueError as e:
             log.status = ImportLog.ImportStatus.FAILED
-            log.error_details = [{"error": str(e)}]
+            log.error_details = [{
+                "code": "PARSE_ERROR",
+                "error": str(e),
+                "type": "data"
+            }]
             log.completed_at = datetime.now(tz=timezone.utc)
             log.save()
             return Response(
-                {"error": str(e), "import_log_id": str(log.id)},
+                {
+                    "error": str(e),
+                    "error_code": "PARSE_ERROR",
+                    "import_log_id": str(log.id)
+                },
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
 
         except Exception as e:
             logger.exception(f"[ExcelUploadView] Unexpected error: {e}")
             log.status = ImportLog.ImportStatus.FAILED
-            log.error_details = [{"error": f"Internal error: {str(e)}"}]
+            log.error_details = [{
+                "code": "INTERNAL_ERROR",
+                "error": f"Internal error: {str(e)}",
+                "type": "system"
+            }]
             log.completed_at = datetime.now(tz=timezone.utc)
             log.save()
             return Response(
-                {"error": "An unexpected error occurred during import. Please try again."},
+                {
+                    "error": "An unexpected error occurred during import. Please try again.",
+                    "error_code": "INTERNAL_ERROR",
+                    "import_log_id": str(log.id)
+                },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
