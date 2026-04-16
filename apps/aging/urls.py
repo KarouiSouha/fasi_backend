@@ -7,6 +7,7 @@ from .views import (
     AgingReportDatesView,
     AgingSnapshotListView,
     AgingHistoricalTrendView,
+    AgingCustomerGrowthView,
 )
 
 app_name = "aging"
@@ -32,5 +33,7 @@ urlpatterns = [
     # GET /api/aging/{id}/                      → full record detail
     path("<uuid:aging_id>/", AgingDetailView.as_view(), name="aging-detail"),
     path("historical-trend/", AgingHistoricalTrendView.as_view(), name="aging-historical-trend"),
+    
+    path("customer-growth/", AgingCustomerGrowthView.as_view(), name="aging-customer-growth"),
 
 ]

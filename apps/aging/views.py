@@ -22,6 +22,7 @@ AGING_BUCKETS = [
     ("d301_330", "301-330d", 315),
     ("over_330", ">330d", 400),
 ]
+GROWTH_COMPARISON_YEARS = 5   # fenêtre de comparaison
 
 
 def _strip_param(request, key: str, default: str = "") -> str:
@@ -419,3 +420,134 @@ class AgingHistoricalTrendView(APIView):
             })
 
         return Response({"count": len(result), "trend": result})
+
+
+class AgingCustomerGrowthView(APIView):
+    """
+    GET /api/aging/customer-growth/
+ 
+    Calcule le nombre de clients par année (un snapshot par an) et ajoute :
+ 
+      growth_rate          — % vs année précédente  (inchangé, pour le tableau)
+      growth_rate_vs_5y    — % entre l'année courante et (année courante − 5)
+                             NULL si l'année de référence n'est pas disponible
+      is_5y_comparison     — true sur la ligne de l'année la plus récente
+ 
+    L'année de référence (−5 ans) est déterminée dynamiquement : si
+    les données couvrent [2019, 2020, 2021, 2022, 2023, 2024] et que
+    l'année la plus récente est 2024, la comparaison est 2024 vs 2019.
+    """
+    permission_classes = [IsAuthenticated]
+ 
+    def get(self, request):
+        company = request.user.company
+ 
+        snapshots = (
+            AgingSnapshot.objects
+            .filter(company=company)
+            .order_by("uploaded_at")
+        )
+ 
+        # ── 1. Grouper par année (garder le snapshot le plus récent) ──────────
+        year_snapshots: dict = {}
+        for snap in snapshots:
+            if snap.aging_year:
+                year = snap.aging_year
+            elif snap.report_date:
+                year = snap.report_date.year
+            else:
+                year = snap.uploaded_at.year
+            if year not in year_snapshots or snap.uploaded_at > year_snapshots[year].uploaded_at:
+                year_snapshots[year] = snap
+ 
+        # ── 2. Compter les clients par année ──────────────────────────────────
+        yearly_data = []
+        for year in sorted(year_snapshots.keys()):
+            snap  = year_snapshots[year]
+            count = AgingReceivable.objects.filter(snapshot=snap, total__gt=0).count()
+            yearly_data.append({
+                "year":        year,
+                "snapshot_id": str(snap.id),
+                "label":       str(snap.report_date or snap.uploaded_at.date()),
+                "customer_count": count,
+            })
+ 
+        if not yearly_data:
+            return Response({"count": 0, "years": []})
+ 
+        # ── 3. Fenêtre de 5 ans : année la plus récente vs (année − 5) ───────
+        latest_year  = yearly_data[-1]["year"]
+        ref_year     = latest_year - GROWTH_COMPARISON_YEARS
+        # Chercher l'entrée la plus proche de ref_year (exacte si possible)
+        ref_entry = next(
+            (e for e in yearly_data if e["year"] == ref_year),
+            None,
+        )
+        # Si l'année exacte n'est pas disponible, prendre la plus ancienne
+        # dont l'écart avec latest_year est ≤ 5 ans
+        if ref_entry is None and len(yearly_data) >= 2:
+            candidates = [
+                e for e in yearly_data[:-1]
+                if latest_year - e["year"] <= GROWTH_COMPARISON_YEARS
+            ]
+            ref_entry = candidates[0] if candidates else yearly_data[0]
+ 
+        ref_count = ref_entry["customer_count"] if ref_entry else None
+        ref_year_actual = ref_entry["year"] if ref_entry else None
+ 
+        # ── 4. Construire le résultat ligne par ligne ──────────────────────────
+        result = []
+        for i, entry in enumerate(yearly_data):
+            prev       = yearly_data[i - 1] if i > 0 else None
+            is_latest  = (entry["year"] == latest_year)
+ 
+            # Taux de croissance annuel (inchangé)
+            growth_rate     = None
+            growth_absolute = None
+            if prev and prev["customer_count"] > 0:
+                growth_rate = round(
+                    ((entry["customer_count"] - prev["customer_count"]) / prev["customer_count"]) * 100,
+                    2,
+                )
+                growth_absolute = entry["customer_count"] - prev["customer_count"]
+ 
+            # Taux vs 5 ans : affiché seulement sur la ligne la plus récente
+            growth_rate_vs_5y    = None
+            growth_abs_vs_5y     = None
+            is_5y_comparison     = False
+            if is_latest and ref_entry and ref_entry["year"] != latest_year and ref_count and ref_count > 0:
+                growth_rate_vs_5y = round(
+                    ((entry["customer_count"] - ref_count) / ref_count) * 100,
+                    2,
+                )
+                growth_abs_vs_5y = entry["customer_count"] - ref_count
+                is_5y_comparison = True
+ 
+            result.append({
+                "year":             entry["year"],
+                "snapshot_id":      entry["snapshot_id"],
+                "label":            entry["label"],
+                "customer_count":   entry["customer_count"],
+ 
+                # Comparaison N vs N-1 (tableau ligne par ligne)
+                "prev_count":       prev["customer_count"] if prev else None,
+                "growth_rate":      growth_rate,
+                "growth_absolute":  growth_absolute,
+                "is_growth":        (growth_rate > 0) if growth_rate is not None else None,
+ 
+                # Comparaison N vs N-5 (badge principal)
+                "growth_rate_vs_5y":   growth_rate_vs_5y,
+                "growth_abs_vs_5y":    growth_abs_vs_5y,
+                "is_5y_comparison":    is_5y_comparison,
+                "ref_year_for_5y":     ref_year_actual if is_5y_comparison else None,
+            })
+ 
+        return Response({
+            "count":                 len(result),
+            "comparison_window":     GROWTH_COMPARISON_YEARS,
+            "latest_year":           latest_year,
+            "reference_year":        ref_year_actual,
+            "reference_count":       ref_count,
+            "years":                 result,
+        })
+ 

@@ -22,6 +22,7 @@ from .forgot_password_views import (
     ForgotPasswordVerifyView,
     ForgotPasswordResetView,
 )
+
 app_name = "authentication"
 
 urlpatterns = [
@@ -61,4 +62,5 @@ urlpatterns = [
     path("users/",                               AllUsersListView.as_view(),         name="user-list"),
     path("users/<uuid:user_id>/permissions/",    UpdateUserPermissionsView.as_view(),name="user-permissions"),
     path("users/<uuid:user_id>/status/",         UpdateUserStatusView.as_view(),     name="user-status"),
+    
 ]
