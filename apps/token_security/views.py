@@ -23,23 +23,23 @@ class LoginView(APIView):
     """
     POST /api/auth/login/
 
-    Authentifie un utilisateur et retourne une paire de tokens JWT.
+    Authenticates a user and returns a JWT token pair.
 
-    Corps de la requête :
-        - email    : adresse email de l'utilisateur
-        - password : mot de passe
+    Request body:
+        - email    : user's email address
+        - password : password
 
-    Réponse succès (200) :
-        - access     : access token JWT (durée : 60 minutes)
-        - refresh    : refresh token JWT (durée : 7 jours)
-        - session_id : identifiant de la session créée
-        - user       : informations de base de l'utilisateur connecté
+    Success response (200):
+        - access     : access JWT token (expires in 60 minutes)
+        - refresh    : refresh JWT token (expires in 7 days)
+        - session_id : ID of the created session
+        - user       : basic information of the logged-in user
 
-    Erreurs possibles :
-        - 400 : données manquantes
-        - 401 : identifiants incorrects
-        - 403 : compte en attente / rejeté / suspendu
-        - 429 : trop de tentatives (géré par RateLimitLoginMiddleware)
+    Possible errors:
+        - 400 : missing data
+        - 401 : invalid credentials
+        - 403 : account pending / rejected / suspended
+        - 429 : too many attempts (handled by RateLimitLoginMiddleware)
     """
     permission_classes = [AllowAny]
 
@@ -52,15 +52,15 @@ class LoginView(APIView):
 
         if not email or not password:
             return Response(
-                {"error": "L'email et le mot de passe sont requis."},
+                {"error": "Email and password are required."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Authentification des identifiants
+        # Authenticate credentials
         user = authenticate(request, username=email, password=password)
 
         if user is None:
-            # Enregistrement de la tentative échouée
+            # Log failed attempt
             LoginAttempt.objects.create(
                 email=email,
                 ip_address=get_client_ip(request),
@@ -69,11 +69,11 @@ class LoginView(APIView):
                 failure_reason="invalid_credentials",
             )
             return Response(
-                {"error": "Email ou mot de passe incorrect."},
+                {"error": "Invalid email or password."},
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
-        # Vérification du statut du compte
+        # Check account status
         account_status_error = self._check_account_status(user)
         if account_status_error:
             LoginAttempt.objects.create(
@@ -88,7 +88,7 @@ class LoginView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # Enregistrement de la tentative réussie
+        # Log successful attempt
         LoginAttempt.objects.create(
             email=email,
             ip_address=get_client_ip(request),
@@ -96,7 +96,7 @@ class LoginView(APIView):
             is_successful=True,
         )
 
-        # Génération des tokens et création de la session
+        # Generate tokens and create session
         tokens = TokenService.issue_tokens(user=user, request=request)
 
         return Response(
@@ -115,24 +115,24 @@ class LoginView(APIView):
 
     def _check_account_status(self, user) -> dict | None:
         """
-        Vérifie que le compte est autorisé à se connecter.
+        Checks if the account is allowed to log in.
 
         Returns:
-            None si le compte est valide.
-            Dict avec "code" et "message" si le compte est bloqué.
+            None if the account is valid.
+            Dict with "code" and "message" if the account is blocked.
         """
         status_messages = {
             "pending": {
                 "code": "account_pending",
-                "message": "Votre compte est en attente d'approbation par un administrateur.",
+                "message": "Your account is pending approval by an administrator.",
             },
             "rejected": {
                 "code": "account_rejected",
-                "message": "Votre demande d'accès a été rejetée. Contactez un administrateur.",
+                "message": "Your access request has been rejected. Please contact an administrator.",
             },
             "suspended": {
                 "code": "account_suspended",
-                "message": "Votre compte a été suspendu. Contactez un administrateur.",
+                "message": "Your account has been suspended. Please contact an administrator.",
             },
         }
         return status_messages.get(user.status)
@@ -142,19 +142,19 @@ class RefreshView(APIView):
     """
     POST /api/auth/token/refresh/
 
-    Renouvelle l'access token via rotation du refresh token.
-    L'ancien refresh token est immédiatement révoqué et un nouveau est émis.
+    Renews the access token using refresh token rotation.
+    The old refresh token is immediately revoked and a new one is issued.
 
-    Corps de la requête :
-        - refresh : refresh token actuel
+    Request body:
+        - refresh : current refresh token
 
-    Réponse succès (200) :
-        - access  : nouvel access token
-        - refresh : nouveau refresh token
+    Success response (200):
+        - access  : new access token
+        - refresh : new refresh token
 
-    Erreurs possibles :
-        - 400 : refresh token manquant ou invalide
-        - 401 : token expiré, révoqué, ou réutilisé (attaque détectée)
+    Possible errors:
+        - 400 : missing or invalid refresh token
+        - 401 : token expired, revoked, or reused (attack detected)
     """
     permission_classes = [AllowAny]
 
@@ -166,11 +166,11 @@ class RefreshView(APIView):
         raw_refresh_token = serializer.validated_data["refresh"]
 
         try:
-            # Décodage et validation du refresh token
+            # Decode and validate the refresh token
             refresh_token = CustomRefreshToken(raw_refresh_token)
             token_payload = refresh_token.payload
 
-            # Rotation : révoque l'ancien, génère le nouveau
+            # Rotate: revoke old token and generate new one
             new_tokens = TokenService.rotate_refresh_token(
                 old_refresh_token_payload=token_payload,
                 request=request,
@@ -178,7 +178,7 @@ class RefreshView(APIView):
             return Response(new_tokens, status=status.HTTP_200_OK)
 
         except ValueError as e:
-            # Réutilisation d'un ancien token détectée : tous les tokens révoqués
+            # Token reuse detected: all tokens revoked
             return Response(
                 {"error": str(e), "code": "token_reuse_detected"},
                 status=status.HTTP_401_UNAUTHORIZED,
@@ -191,14 +191,14 @@ class LogoutView(APIView):
     """
     POST /api/auth/logout/
 
-    Déconnecte l'utilisateur de l'appareil actuel uniquement.
-    Révoque le refresh token de la session courante.
+    Logs the user out from the current device only.
+    Revokes the refresh token of the current session.
 
-    Corps de la requête :
-        - refresh : refresh token de la session à fermer
+    Request body:
+        - refresh : refresh token of the session to close
 
-    Réponse succès (200) :
-        - message : confirmation de déconnexion
+    Success response (200):
+        - message : logout confirmation
     """
     permission_classes = [IsAuthenticated]
 
@@ -207,7 +207,7 @@ class LogoutView(APIView):
 
         if not raw_refresh_token:
             return Response(
-                {"error": "Le refresh token est requis pour se déconnecter."},
+                {"error": "Refresh token is required to log out."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -223,13 +223,13 @@ class LogoutView(APIView):
             )
 
             return Response(
-                {"message": "Déconnexion réussie."},
+                {"message": "Successfully logged out."},
                 status=status.HTTP_200_OK,
             )
 
         except TokenError:
             return Response(
-                {"error": "Refresh token invalide."},
+                {"error": "Invalid refresh token."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -238,14 +238,14 @@ class LogoutAllView(APIView):
     """
     POST /api/auth/logout-all/
 
-    Déconnecte l'utilisateur de TOUS ses appareils simultanément.
-    Révoque toutes les sessions actives.
+    Logs the user out from ALL their devices simultaneously.
+    Revokes all active sessions.
 
-    Aucun corps de requête requis.
+    No request body required.
 
-    Réponse succès (200) :
+    Success response (200):
         - message          : confirmation
-        - sessions_revoked : nombre de sessions révoquées
+        - sessions_revoked : number of sessions revoked
     """
     permission_classes = [IsAuthenticated]
 
@@ -257,7 +257,7 @@ class LogoutAllView(APIView):
 
         return Response(
             {
-                "message": f"Déconnexion de tous vos appareils réussie.",
+                "message": "Successfully logged out from all your devices.",
                 "sessions_revoked": count,
             },
             status=status.HTTP_200_OK,
@@ -268,11 +268,10 @@ class ActiveSessionsView(APIView):
     """
     GET /api/auth/sessions/
 
-    Retourne la liste de tous les appareils actuellement connectés
-    au compte de l'utilisateur authentifié.
+    Returns the list of all devices currently connected to the authenticated user's account.
 
-    Réponse succès (200) :
-        - sessions : liste des sessions actives avec device_name, ip, last_activity
+    Success response (200):
+        - sessions : list of active sessions with device_name, ip, last_activity
     """
     permission_classes = [IsAuthenticated]
 
@@ -290,13 +289,13 @@ class RevokeSessionView(APIView):
     """
     DELETE /api/auth/sessions/{session_id}/
 
-    Révoque une session spécifique à distance (déconnecte un appareil précis).
-    L'utilisateur ne peut révoquer que ses propres sessions.
+    Revokes a specific session remotely (logs out a particular device).
+    The user can only revoke their own sessions.
 
-    Paramètre URL :
-        - session_id : UUID de la session à révoquer
+    URL parameter:
+        - session_id : UUID of the session to revoke
 
-    Réponse succès (200) :
+    Success response (200):
         - message : confirmation
     """
     permission_classes = [IsAuthenticated]
@@ -309,7 +308,7 @@ class RevokeSessionView(APIView):
             )
         except ActiveSession.DoesNotExist:
             return Response(
-                {"error": "Session introuvable ou accès non autorisé."},
+                {"error": "Session not found or access denied."},
                 status=status.HTTP_404_NOT_FOUND,
             )
 
@@ -321,6 +320,6 @@ class RevokeSessionView(APIView):
         )
 
         return Response(
-            {"message": "Session révoquée avec succès."},
+            {"message": "Session revoked successfully."},
             status=status.HTTP_200_OK,
         )

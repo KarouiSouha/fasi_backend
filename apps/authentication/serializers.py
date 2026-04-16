@@ -66,11 +66,46 @@ class UserListSerializer(serializers.ModelSerializer):
     Simplified display of a user in a list view.
     """
     full_name = serializers.CharField(read_only=True)
-    company_name = serializers.CharField(read_only=True)
-    company_industry    = serializers.CharField(source="company.industry",    read_only=True, default=None, allow_null=True)
-    company_country     = serializers.CharField(source="company.country",     read_only=True, default=None, allow_null=True)
-    company_city        = serializers.CharField(source="company.city",        read_only=True, default=None, allow_null=True)
-    company_current_erp = serializers.CharField(source="company.current_erp", read_only=True, default=None, allow_null=True)
+    company_name = serializers.SerializerMethodField()
+    company_industry = serializers.SerializerMethodField()
+    company_country = serializers.SerializerMethodField()
+    company_city = serializers.SerializerMethodField()
+    company_current_erp = serializers.SerializerMethodField()
+
+    def _effective_company(self, obj):
+        """
+        Returns the effective company for display.
+        Agents inherit their manager's company when their own company is missing.
+        """
+        if obj.company:
+            return obj.company
+
+        if obj.role == User.Role.AGENT:
+            manager = getattr(obj, "created_by", None)
+            if manager and manager.company:
+                return manager.company
+
+        return None
+
+    def get_company_name(self, obj):
+        company = self._effective_company(obj)
+        return company.name if company else None
+
+    def get_company_industry(self, obj):
+        company = self._effective_company(obj)
+        return company.industry if company else None
+
+    def get_company_country(self, obj):
+        company = self._effective_company(obj)
+        return company.country if company else None
+
+    def get_company_city(self, obj):
+        company = self._effective_company(obj)
+        return company.city if company else None
+
+    def get_company_current_erp(self, obj):
+        company = self._effective_company(obj)
+        return company.current_erp if company else None
 
     class Meta:
         model = User

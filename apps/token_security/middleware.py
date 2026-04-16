@@ -7,30 +7,29 @@ from .utils import get_client_ip, get_device_fingerprint
 
 security_logger = logging.getLogger("security")
 
-# Constantes de rate limiting
-MAX_LOGIN_ATTEMPTS = 5          # Nombre maximum de tentatives avant blocage
-LOCKOUT_DURATION = 15 * 60     # Durée du blocage en secondes (15 minutes)
+# Rate limiting constants
+MAX_LOGIN_ATTEMPTS = 5          # Maximum number of attempts before lockout
+LOCKOUT_DURATION = 15 * 60      # Lockout duration in seconds (15 minutes)
 LOCKOUT_CACHE_PREFIX = "login_lockout"
 ATTEMPTS_CACHE_PREFIX = "login_attempts"
 
 
 class JWTFingerprintMiddleware:
     """
-    Middleware de vérification de l'empreinte de l'appareil.
+    Middleware for device fingerprint verification.
 
-    À chaque requête authentifiée, vérifie que le device fingerprint calculé
-    depuis les headers de la requête correspond à celui stocké dans le token JWT.
+    On every authenticated request, it calculates the device fingerprint
+    from the request headers and injects it into the request object.
 
-    Note : La vérification réelle est déléguée à DeviceValidator dans backends.py.
-    Ce middleware se charge uniquement d'injecter le fingerprint dans la requête
-    pour qu'il soit accessible par le backend d'authentification.
+    Note: The actual validation is delegated to DeviceValidator in backends.py.
+    This middleware only injects the fingerprint so it can be accessed by the authentication backend.
     """
 
     def __init__(self, get_response):
         self.get_response = get_response
 
     def __call__(self, request):
-        # Calcul et injection du fingerprint dans la requête
+        # Calculate and inject the fingerprint into the request
         request.device_fingerprint = get_device_fingerprint(request)
         request.client_ip = get_client_ip(request)
 
@@ -40,15 +39,15 @@ class JWTFingerprintMiddleware:
 
 class RateLimitLoginMiddleware:
     """
-    Middleware de protection contre les attaques par force brute.
+    Middleware to protect against brute-force attacks.
 
-    Bloque une adresse IP pendant LOCKOUT_DURATION secondes si elle dépasse
-    MAX_LOGIN_ATTEMPTS tentatives de connexion échouées consécutives.
+    Blocks an IP address for LOCKOUT_DURATION seconds if it exceeds
+    MAX_LOGIN_ATTEMPTS consecutive failed login attempts.
 
-    Le compteur est stocké dans Redis (via Django cache) pour performance et persistence.
-    Le compteur est réinitialisé après une connexion réussie.
+    The counter is stored in Redis (via Django cache) for performance and persistence.
+    The counter is reset after a successful login.
 
-    S'applique uniquement sur l'endpoint de login (POST /api/auth/login/).
+    Applies only to the login endpoint (POST /api/auth/login/).
     """
 
     LOGIN_PATH = "/api/auth/login/"
@@ -60,17 +59,17 @@ class RateLimitLoginMiddleware:
         if request.method == "POST" and request.path == self.LOGIN_PATH:
             ip_address = get_client_ip(request)
 
-            # Vérification si l'IP est actuellement bloquée
+            # Check if the IP is currently locked out
             if self._is_locked_out(ip_address):
                 security_logger.warning(
-                    f"Tentative de connexion bloquée depuis {ip_address} "
-                    f"(trop de tentatives échouées)."
+                    f"Login attempt blocked from {ip_address} "
+                    f"(too many failed attempts)."
                 )
                 return JsonResponse(
                     {
-                        "error": "Trop de tentatives de connexion échouées. "
-                                 "Votre accès est temporairement bloqué. "
-                                 "Réessayez dans 15 minutes.",
+                        "error": "Too many failed login attempts. "
+                                 "Your access has been temporarily blocked. "
+                                 "Please try again in 15 minutes.",
                         "code": "rate_limited",
                     },
                     status=429,
@@ -78,15 +77,15 @@ class RateLimitLoginMiddleware:
 
         response = self.get_response(request)
 
-        # Mise à jour du compteur de tentatives selon la réponse
+        # Update attempt counter based on the response
         if request.method == "POST" and request.path == self.LOGIN_PATH:
             ip_address = get_client_ip(request)
 
             if response.status_code == 200:
-                # Connexion réussie : réinitialisation du compteur
+                # Successful login: reset the counter
                 self._reset_attempts(ip_address)
             elif response.status_code in (400, 401, 403):
-                # Connexion échouée : incrémentation du compteur
+                # Failed login: increment the counter
                 self._increment_attempts(ip_address)
 
         return response
@@ -104,7 +103,7 @@ class RateLimitLoginMiddleware:
             lockout_key = f"{LOCKOUT_CACHE_PREFIX}:{ip_address}"
             cache.set(lockout_key, True, timeout=LOCKOUT_DURATION)
             security_logger.warning(
-                f"IP {ip_address} bloquée après {attempts} tentatives échouées."
+                f"IP {ip_address} locked out after {attempts} failed attempts."
             )
 
     def _reset_attempts(self, ip_address: str) -> None:
@@ -116,14 +115,14 @@ class RateLimitLoginMiddleware:
 
 class SuspiciousActivityMiddleware:
     """
-    Middleware de détection d'activité suspecte.
+    Middleware for detecting suspicious activity.
 
-    Surveille les comportements anormaux après authentification :
-        - Changement d'adresse IP entre deux requêtes successives
-        - Tentatives d'accès à des ressources non autorisées (403 répétés)
+    Monitors abnormal behaviors after authentication:
+        - Change of IP address between successive requests
+        - Repeated attempts to access unauthorized resources (repeated 403s)
 
-    Ce middleware ne bloque pas les requêtes mais les enregistre dans security.log
-    pour permettre une surveillance et une réaction humaine si nécessaire.
+    This middleware does not block requests but logs them in security.log
+    for monitoring and potential human review.
     """
 
     def __init__(self, get_response):
@@ -132,12 +131,12 @@ class SuspiciousActivityMiddleware:
     def __call__(self, request):
         response = self.get_response(request)
 
-        # Log des accès refusés répétés (potentielle tentative de contournement)
+        # Log repeated denied access (potential bypass attempt)
         if response.status_code == 403 and hasattr(request, "user") and request.user.is_authenticated:
             ip_address = get_client_ip(request)
             security_logger.warning(
-                f"Accès refusé (403) pour [{request.user.email}] "
-                f"sur {request.path} depuis {ip_address}."
+                f"Access denied (403) for [{request.user.email}] "
+                f"on {request.path} from {ip_address}."
             )
 
         return response

@@ -1,5 +1,6 @@
 import logging
 from django.contrib.auth import get_user_model
+from django.db import transaction
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -145,13 +146,23 @@ class AgentListView(APIView):
 
     def get(self, request):
         if request.user.is_admin:
-            agents = User.objects.filter(role=User.Role.AGENT).order_by("-created_at")
+            agents = (
+                User.objects
+                .filter(role=User.Role.AGENT)
+                .select_related("company", "created_by__company")
+                .order_by("-created_at")
+            )
         else:
             # Manager sees agents from their own Company
-            agents = User.objects.filter(
-                role=User.Role.AGENT,
-                company=request.user.company,
-            ).order_by("-created_at")
+            agents = (
+                User.objects
+                .filter(
+                    role=User.Role.AGENT,
+                    company=request.user.company,
+                )
+                .select_related("company", "created_by__company")
+                .order_by("-created_at")
+            )
 
         serializer = UserListSerializer(agents, many=True)
         return Response(
@@ -337,14 +348,66 @@ class UpdateUserStatusView(APIView):
         reason = serializer.validated_data.get("reason", "")
 
         if new_status == User.AccountStatus.SUSPENDED:
-            target_user.suspend(reason=reason)
-            # Revoke all sessions of the suspended user
             from apps.token_security.services import TokenService
-            TokenService.revoke_all_user_tokens(user=target_user, reason="admin_revoked")
-            message = f"The account of {target_user.email} has been suspended."
+
+            suspended_agents_count = 0
+
+            with transaction.atomic():
+                target_user.suspend(reason=reason)
+                # Revoke all sessions of the suspended user
+                TokenService.revoke_all_user_tokens(user=target_user, reason="admin_revoked")
+
+                # If the suspended user is a manager, suspend all their associated agents too.
+                if target_user.role == User.Role.MANAGER:
+                    associated_agents = list(
+                        User.objects.filter(
+                            role=User.Role.AGENT,
+                            created_by=target_user,
+                        ).exclude(status=User.AccountStatus.SUSPENDED)
+                    )
+
+                    for agent in associated_agents:
+                        agent_reason = reason or f"Manager {target_user.email} suspended by admin."
+                        agent.suspend(reason=agent_reason)
+                        TokenService.revoke_all_user_tokens(user=agent, reason="admin_revoked")
+
+                    suspended_agents_count = len(associated_agents)
+
+            if suspended_agents_count > 0:
+                message = (
+                    f"The account of {target_user.email} has been suspended. "
+                    f"{suspended_agents_count} associated agent(s) were suspended too."
+                )
+            else:
+                message = f"The account of {target_user.email} has been suspended."
         else:
-            target_user.activate()
-            message = f"The account of {target_user.email} has been reactivated."
+            reactivated_agents_count = 0
+
+            with transaction.atomic():
+                target_user.activate()
+
+                # If the reactivated user is a manager, reactivate their suspended agents.
+                if target_user.role == User.Role.MANAGER:
+                    associated_agents = list(
+                        User.objects.filter(
+                            role=User.Role.AGENT,
+                            created_by=target_user,
+                            status=User.AccountStatus.SUSPENDED,
+                        )
+                    )
+
+                    for agent in associated_agents:
+                        agent.activate()
+
+                    reactivated_agents_count = len(associated_agents)
+
+            if reactivated_agents_count > 0:
+                message = (
+                    f"The account of {target_user.email} has been reactivated. "
+                    f"{reactivated_agents_count} associated agent(s) were reactivated too."
+                )
+            else:
+                message = f"The account of {target_user.email} has been reactivated."
 
         return Response({"message": message}, status=status.HTTP_200_OK)
 
@@ -362,7 +425,7 @@ class AllUsersListView(APIView):
         role_filter = request.query_params.get("role")
         status_filter = request.query_params.get("status")
 
-        users = User.objects.exclude(id=request.user.id)
+        users = User.objects.exclude(id=request.user.id).select_related("company", "created_by__company")
 
         if role_filter:
             users = users.filter(role=role_filter)

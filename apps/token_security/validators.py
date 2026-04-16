@@ -6,110 +6,109 @@ from .models import TokenBlacklist
 
 class TokenVersionValidator:
     """
-    Vérifie que la version du token correspond à la version actuelle de l'utilisateur.
+    Checks that the token version matches the user's current version.
 
-    Lors d'un changement de mot de passe ou d'un reset, le champ token_version
-    de l'utilisateur est incrémenté en base de données.
-    Tout token contenant une ancienne version devient automatiquement invalide,
-    sans avoir besoin de les blacklister un par un.
+    When a password change or reset occurs, the user's token_version field
+    is incremented in the database. Any token containing an older version
+    automatically becomes invalid, without needing to blacklist them one by one.
     """
 
     def validate(self, token_payload: dict, user) -> None:
         """
         Args:
-            token_payload : payload décodé du JWT
-            user          : instance User récupérée depuis la DB
+            token_payload : decoded JWT payload
+            user          : User instance retrieved from the database
 
         Raises:
-            AuthenticationFailed si la version du token est obsolète.
+            AuthenticationFailed if the token version is obsolete.
         """
         token_version = token_payload.get("token_version")
 
         if token_version is None:
             raise AuthenticationFailed(
-                _("Token invalide : version manquante."),
+                _("Invalid token: version missing."),
                 code="token_version_missing",
             )
 
         if int(token_version) != user.token_version:
             raise AuthenticationFailed(
-                _("Session expirée. Votre mot de passe a été modifié. Veuillez vous reconnecter."),
+                _("Session expired. Your password has been changed. Please log in again."),
                 code="token_version_mismatch",
             )
 
 
 class BlacklistValidator:
     """
-    Vérifie que le JTI (JWT ID) du token n'est pas présent dans la blacklist.
-    Consulté à chaque requête authentifiée via CustomJWTAuthentication.
+    Checks that the JTI (JWT ID) of the token is not present in the blacklist.
+    Consulted on every authenticated request via CustomJWTAuthentication.
     """
 
     def validate(self, token_jti: str) -> None:
         """
         Args:
-            token_jti : identifiant unique du token (champ "jti" du payload)
+            token_jti : unique identifier of the token ("jti" field from the payload)
 
         Raises:
-            AuthenticationFailed si le token a été révoqué.
+            AuthenticationFailed if the token has been revoked.
         """
         if TokenBlacklist.objects.filter(token_jti=token_jti).exists():
             raise AuthenticationFailed(
-                _("Token révoqué. Veuillez vous reconnecter."),
+                _("Token has been revoked. Please log in again."),
                 code="token_blacklisted",
             )
 
 
 class DeviceValidator:
     """
-    Vérifie que l'empreinte de l'appareil (device fingerprint) correspond
-    à celle enregistrée dans le payload du token lors de la connexion.
+    Verifies that the device fingerprint in the token matches the one
+    recorded during login.
 
-    Protège contre le vol de token : même si un attaquant récupère un token,
-    il ne peut pas l'utiliser depuis un appareil différent.
+    Protects against token theft: even if an attacker steals a token,
+    they cannot use it from a different device.
     """
 
     def validate(self, token_payload: dict, current_fingerprint: str) -> None:
         """
         Args:
-            token_payload        : payload décodé du JWT
-            current_fingerprint  : empreinte de l'appareil de la requête courante
+            token_payload        : decoded JWT payload
+            current_fingerprint  : fingerprint of the current request's device
 
         Raises:
-            AuthenticationFailed si l'empreinte ne correspond pas.
+            AuthenticationFailed if the fingerprint does not match.
         """
         stored_fp = token_payload.get("device_fp")
 
         if not stored_fp:
-            # Token généré sans fingerprint (ancien format) : on tolère
+            # Token generated without fingerprint (legacy format): we tolerate it
             return
 
         current_fp_hash = hashlib.sha256(current_fingerprint.encode()).hexdigest()
 
         if stored_fp != current_fp_hash:
             raise AuthenticationFailed(
-                _("Appareil non reconnu. Session invalide."),
+                _("Unrecognized device. Invalid session."),
                 code="device_fingerprint_mismatch",
             )
 
 
 class IPValidator:
     """
-    Vérifie si l'adresse IP de la requête correspond à celle enregistrée lors du login.
+    Checks whether the request's IP address matches the one recorded during login.
 
-    Contrairement au DeviceValidator, ce validateur ne bloque PAS automatiquement
-    (les utilisateurs mobiles changent souvent d'IP).
-    Il retourne un signal d'avertissement utilisé par SuspiciousActivityMiddleware.
+    Unlike DeviceValidator, this validator does NOT automatically block the request
+    (mobile users often change IP addresses).
+    It returns a warning signal used by SuspiciousActivityMiddleware.
     """
 
     def validate(self, token_payload: dict, current_ip: str) -> bool:
         """
         Args:
-            token_payload : payload décodé du JWT
-            current_ip    : adresse IP de la requête courante
+            token_payload : decoded JWT payload
+            current_ip    : IP address of the current request
 
         Returns:
-            True  : l'IP correspond (situation normale)
-            False : l'IP a changé (possible activité suspecte, à logger)
+            True  : IP matches (normal situation)
+            False : IP has changed (possible suspicious activity, should be logged)
         """
         stored_ip_hash = token_payload.get("ip_hash")
 
