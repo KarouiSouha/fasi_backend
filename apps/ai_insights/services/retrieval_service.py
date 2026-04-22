@@ -20,10 +20,13 @@ import logging
 import datetime
 import re
 
+from Backend.config import settings
+
 from .langgraph_workflow import LangGraphWorkflow
 from .query_weaver_service import QueryWeaverService
 from .sql_service import SQLService
 from .qdrant_service import QdrantService, QdrantServiceUnavailable
+from .text_to_sql_service import TextToSQLService, TextToSQLError
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,7 @@ class RetrievalService:
         self.query_weaver = QueryWeaverService()
         self.sql          = SQLService()
         self.qdrant_service = None
+        self.text_to_sql     = TextToSQLService()
         self._init_qdrant()
 
     def _init_qdrant(self):
@@ -373,6 +377,41 @@ class RetrievalService:
                 "mode":             "llm_only",
                 "business_summary": self._build_business_summary(company, start_date, end_date),
             }
+            
+        # Activé quand aucun des 25 intents ne correspond
+        use_text_to_sql = getattr(settings, "AI_TEXT_TO_SQL_ENABLED", True)
+
+        if use_text_to_sql:
+            logger.info(
+                "[RetrievalService] No intent matched — activating Text-to-SQL"
+            )
+            t2s_result = self.text_to_sql.query(
+                question=question,
+                company=company,
+            )
+            if t2s_result["success"]:
+                return {
+                    "mode":              "text_to_sql",
+                    "text_to_sql":       t2s_result,
+                    "prompt_context":    t2s_result["prompt_context"],
+                    "display_data":      t2s_result["display_data"],
+                    "sql_generated":     t2s_result["sql_generated"],
+                    "explanation":       t2s_result["explanation"],
+                    "confidence":        t2s_result["confidence"],
+                }
+            else:
+                logger.warning(
+                    "[RetrievalService] Text-to-SQL failed: %s",
+                    t2s_result["error"],
+                )
+
+        # Dernier recours : résumé LLM-only
+        return {
+            "mode":             "llm_only",
+            "business_summary": self._build_business_summary(
+                company, start_date, end_date
+            ),
+        }
 
         # ── FALLBACK : résumé ventes ──────────────────────────────────────────
         return self._build_global_sql(company, start_date, end_date)
@@ -517,6 +556,8 @@ class RetrievalService:
         if mode == "vector":
             return {**base, "type": "vector"}
         return {**base, "type": "llm_only"}
+    
+    
 
     # ══════════════════════════════════════════════════════════════════════════
     # DATES

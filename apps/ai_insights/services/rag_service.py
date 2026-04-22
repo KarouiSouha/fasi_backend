@@ -18,6 +18,7 @@ CORRECTIONS v4 :
 import logging
 
 from django.conf import settings
+from flask import ctx
 
 from .openai_service import OpenAIService
 from .retrieval_service import RetrievalService
@@ -220,6 +221,9 @@ The 'answer' field must be a plain readable string — no JSON objects, no code 
             )
 
         mode = ctx.get("mode", "sql")
+        
+        if mode == "text_to_sql":
+            return self._fmt_text_to_sql(ctx)
 
         if mode == "hybrid":
             return (
@@ -961,3 +965,21 @@ The 'answer' field must be a plain readable string — no JSON objects, no code 
             f"[{i+1}] {item.get('text', '')[:400]} (score={item.get('score', 0):.3f})"
             for i, item in enumerate(items[:6])
         )
+        
+    def _fmt_text_to_sql(self, ctx: dict) -> str:
+        """Formate le résultat Text-to-SQL pour le prompt RAG."""
+        t2s = ctx.get("text_to_sql", {})
+
+        if not t2s.get("success"):
+            return f"TEXT-TO-SQL FAILED: {t2s.get('error', 'unknown')}"
+
+        lines = [
+            "=== RÉSULTAT TEXT-TO-SQL ===",
+            f"Requête interprétée : {t2s.get('explanation', '')}",
+            f"Confiance : {t2s.get('confidence', '?')}",
+            f"Lignes : {t2s.get('row_count', 0)}",
+            "",
+            ctx.get("prompt_context", ""),
+        ]
+
+        return "\n".join(lines)

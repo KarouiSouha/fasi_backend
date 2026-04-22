@@ -365,3 +365,9 @@ QDRANT_API_KEY = env("QDRANT_API_KEY", default="")
 QDRANT_COLLECTION_NAME = env("QDRANT_COLLECTION_NAME", default="weeg_documents")
 QDRANT_DISTANCE = env("QDRANT_DISTANCE", default="cosine")
 OPENAI_EMBEDDING_DIM = env.int("OPENAI_EMBEDDING_DIM", default=1536)
+
+# ── Text-to-SQL ───────────────────────────────────────────────────────────────
+AI_TEXT_TO_SQL_ENABLED = True       # Activer/désactiver le feature
+AI_TEXT_TO_SQL_TIMEOUT = 10_000     # Timeout PostgreSQL (ms)
+AI_TEXT_TO_SQL_MAX_ROWS = 500       # Lignes max retournées
+AI_TEXT_TO_SQL_LOG_SQL = True       # Logger les requêtes générées (audit)
