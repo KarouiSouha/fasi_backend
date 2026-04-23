@@ -42,7 +42,7 @@ Règles métier importantes :
   2. Pour le CA (chiffre d'affaires) → utiliser movement_type='ف بيع' et SUM(total_out)
   3. Pour les achats → utiliser movement_type='ف شراء' et SUM(total_in)
   4. Les clients sont dans customer_name (peut être NULL — toujours exclure NULL)
-  5. La branche est soit dans branch_id (FK) soit branch_name (texte legacy)
+    5. La branche est dans branch_id (FK vers branches_branch)
   6. Les dates sont dans movement_date (DateField)
   7. La devise est LYD (Dinar Libyen) — tous les montants en LYD
   8. qty_out = quantité sortie (ventes), qty_in = quantité entrée (achats)
@@ -51,11 +51,11 @@ Règles métier importantes :
 # ── Schéma des tables principales ────────────────────────────────────────────
 
 SCHEMA_DEFINITIONS = {
-    "transactions_materialmovement": {
+    "transactions_movement": {
         "description": "Table principale des mouvements de stock et transactions",
         "columns": {
-            "id":              ("INTEGER", "Clé primaire"),
-            "company_id":      ("INTEGER", "FK → companies.Company — TOUJOURS filtrer par cette colonne"),
+            "id":              ("UUID", "Clé primaire"),
+            "company_id":      ("UUID", "FK → company.id — TOUJOURS filtrer par cette colonne"),
             "movement_type":   ("VARCHAR", "Type de mouvement (voir types arabes ci-dessus)"),
             "movement_date":   ("DATE",    "Date du mouvement"),
             "material_code":   ("VARCHAR", "Code produit (ex: EC0020, BDH110)"),
@@ -69,9 +69,8 @@ SCHEMA_DEFINITIONS = {
             "total_out":       ("DECIMAL", "Montant total sortant (LYD) — CA pour les ventes"),
             "balance_price":   ("DECIMAL", "Prix de revient (coût moyen pondéré)"),
             "customer_name":   ("VARCHAR", "Nom du client (NULL pour certains mouvements)"),
-            "customer_id":     ("INTEGER", "FK → customers.Customer (nullable)"),
-            "branch_id":       ("INTEGER", "FK → branches.Branch (nullable)"),
-            "branch_name":     ("VARCHAR", "Nom de la branche (texte legacy, peut être vide)"),
+            "customer_id":     ("UUID", "FK → customers_customer.id (nullable)"),
+            "branch_id":       ("UUID", "FK → branches_branch.id (nullable)"),
         },
         "indexes": ["company_id", "movement_type", "movement_date", "material_code"],
         "sample_queries": [
@@ -80,11 +79,12 @@ SCHEMA_DEFINITIONS = {
         ]
     },
 
-    "aging_agingreceivable": {
+    "aging_receivable": {
         "description": "Créances clients — vieillissement des impayés",
         "columns": {
-            "id":          ("INTEGER", "Clé primaire"),
-            "snapshot_id": ("INTEGER", "FK → AgingSnapshot (dernier import)"),
+            "id":          ("UUID", "Clé primaire"),
+            "snapshot_id": ("UUID", "FK → aging_snapshot.id (dernier import)"),
+            "company_id":  ("UUID", "FK → company.id"),
             "account":     ("VARCHAR", "Nom du compte client"),
             "account_code":("VARCHAR", "Code compte client"),
             "total":       ("DECIMAL", "Montant total dû (LYD)"),
@@ -96,21 +96,34 @@ SCHEMA_DEFINITIONS = {
             "d121_150":    ("DECIMAL", "121 à 150 jours"),
             "d151_180":    ("DECIMAL", "151 à 180 jours"),
             "over_330":    ("DECIMAL", "Plus de 330 jours — risque de perte"),
-            "risk_score":  ("VARCHAR", "Classification : low / medium / high / critical"),
         },
-        "note": "Toujours joindre avec AgingSnapshot pour filtrer par company_id",
-        "join_hint": "JOIN aging_agingsnapshot s ON s.id = snapshot_id WHERE s.company_id = {company_id} ORDER BY s.uploaded_at DESC LIMIT 1",
+        "note": "Pour prendre le dernier import: joindre aging_snapshot via snapshot_id et trier par uploaded_at DESC",
+        "join_hint": "JOIN aging_snapshot s ON s.id = snapshot_id WHERE s.company_id = %(company_id)s ORDER BY s.uploaded_at DESC LIMIT 1",
     },
 
-    "inventory_inventorysnapshotline": {
+    "aging_snapshot": {
+        "description": "Sessions d'import aging (une ligne par fichier importé)",
+        "columns": {
+            "id":           ("UUID", "Clé primaire"),
+            "company_id":   ("UUID", "FK → company.id"),
+            "aging_year":   ("INTEGER", "Année fiscale extraite du fichier"),
+            "report_date":  ("DATE", "Date du report"),
+            "source_file":  ("VARCHAR", "Nom du fichier importé"),
+            "uploaded_by_id": ("UUID", "FK user (nullable)"),
+            "uploaded_at":  ("TIMESTAMP", "Date d'import"),
+        },
+    },
+
+    "inventory_snapshot_line": {
         "description": "Lignes de stock — une ligne par produit par branche",
         "columns": {
-            "id":              ("INTEGER", "Clé primaire"),
-            "company_id":      ("INTEGER", "FK company — TOUJOURS filtrer"),
+            "id":              ("UUID", "Clé primaire"),
+            "company_id":      ("UUID", "FK company — TOUJOURS filtrer"),
             "product_code":    ("VARCHAR", "Code produit"),
             "product_name":    ("VARCHAR", "Nom produit"),
             "branch_name":     ("VARCHAR", "Nom de la branche"),
             "quantity":        ("DECIMAL", "Quantité en stock"),
+            "unit_cost":       ("DECIMAL", "Coût unitaire"),
             "line_value":      ("DECIMAL", "Valeur en stock (LYD)"),
             "product_category":("VARCHAR", "Catégorie"),
         },
@@ -120,12 +133,14 @@ SCHEMA_DEFINITIONS = {
     "customers_customer": {
         "description": "Référentiel clients",
         "columns": {
-            "id":           ("INTEGER", "Clé primaire"),
-            "company_id":   ("INTEGER", "FK company"),
+            "id":           ("UUID", "Clé primaire"),
+            "company_id":   ("UUID", "FK company"),
             "name":         ("VARCHAR", "Nom du client"),
             "account_code": ("VARCHAR", "Code compte (lien avec aging)"),
+            "address":      ("TEXT", "Adresse"),
             "phone":        ("VARCHAR", "Téléphone"),
             "area_code":    ("VARCHAR", "Zone géographique"),
+            "email":        ("VARCHAR", "Email (nullable)"),
             "is_active":    ("BOOLEAN", "Client actif ou archivé"),
         }
     },
@@ -138,6 +153,17 @@ SCHEMA_DEFINITIONS = {
             "address":   ("VARCHAR", "Adresse"),
             "phone":     ("VARCHAR", "Téléphone"),
             "is_active": ("BOOLEAN", "Branche active"),
+        }
+    },
+
+    "company": {
+        "description": "Référentiel des sociétés",
+        "columns": {
+            "id":         ("UUID", "Clé primaire"),
+            "name":       ("VARCHAR", "Nom de la société"),
+            "is_active":  ("BOOLEAN", "Société active"),
+            "created_at": ("TIMESTAMP", "Date de création"),
+            "updated_at": ("TIMESTAMP", "Dernière mise à jour"),
         }
     },
 }

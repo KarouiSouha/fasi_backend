@@ -69,23 +69,18 @@ class SQLService:
 
     def _filter_branch(self, qs, branch_name):
         """
-        FIX-1 : MovementsParser stocke branch= (FK Branch), pas branch_name= (texte).
-        On filtre sur les deux pour couvrir tous les cas.
+        Filtre par nom de branche via le FK branch.
         """
         if branch_name:
-            qs = qs.filter(
-                Q(branch__name__icontains=branch_name) |
-                Q(branch_name__icontains=branch_name)
-            )
+            qs = qs.filter(branch__name__icontains=branch_name)
         return qs
 
     def _effective_branch_annotation(self):
         """
         FIX-2 : Retourne l'expression d'annotation pour le nom effectif de branche.
-        Priorité : branch_name (texte) si non vide, sinon branch__name (FK).
+        Utilise uniquement branch__name (FK) dans le modèle actuel.
         """
         return Coalesce(
-            NullIf("branch_name", Value("")),
             "branch__name",
             Value(""),
         )

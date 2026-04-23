@@ -27,6 +27,7 @@ from .serializers import (
     AIConversationMessageSerializer,
     AIConversationSerializer,
 )
+from .services.memory_service import MemoryService
 
 logger = logging.getLogger(__name__)
 
@@ -603,155 +604,149 @@ class AIChatView(APIView):
         if err:
             return err
 
-        companies = self._get_authorized_companies(request.user)
-
+        companies       = self._get_authorized_companies(request.user)
         messages        = request.data.get("messages", [])
         conversation_id = request.data.get("conversation_id")
         language        = request.data.get("language", "English")
 
-        conversation = None
-        if conversation_id:
-            conversation = (
-                AIConversation.objects
-                .filter(id=conversation_id, company=company, user=request.user)
-                .first()
-            )
-            if not conversation:
-                return Response({"error": "Conversation not found."}, status=404)
-
         if not messages:
             return Response({"error": "messages is required."}, status=400)
 
-        messages = messages[-self.MAX_HISTORY:]
-
-        context = BusinessContextBuilder().build(
-            company,
-            user_role=getattr(request.user, "role", "manager") or "manager",
-            companies=companies,
-        )
-        if len(context) > self.MAX_CONTEXT_LEN:
-            context = context[:self.MAX_CONTEXT_LEN] + "\n[context truncated]"
-
-        system_prompt = SYSTEM_PROMPT.format(
-            today=date.today().isoformat(),
-            context=context,
-            language=language,
-        )
-
-        api_messages = []
-        for m in messages:
-            role    = m.get("role", "user")
-            content = m.get("content", "")
-            if role not in ("user", "assistant") or not content:
-                continue
-            api_messages.append({"role": role, "content": content})
-
-        if not api_messages:
-            return Response({"error": "No valid messages."}, status=400)
-
         latest_user_message = next(
-            (m["content"] for m in reversed(api_messages) if m["role"] == "user"),
+            (m["content"] for m in reversed(messages) if m.get("role") == "user"),
             "",
         )
         if not latest_user_message:
             return Response({"error": "A user message is required."}, status=400)
 
-        if conversation:
-            persisted_history = list(
-                conversation.messages.order_by("created_at")
-                .values("role", "content")
-            )
-            persisted_history = persisted_history[-(self.MAX_HISTORY - 1):]
-            api_messages = [
-                {"role": m["role"], "content": m["content"]}
-                for m in persisted_history
-                if m["role"] in ("user", "assistant") and m["content"]
-            ]
-            api_messages.append({"role": "user", "content": latest_user_message})
-
-        if not conversation:
-            conversation = AIConversation.objects.create(
-                company=company,
-                user=request.user,
-                title=_conversation_title_from_text(latest_user_message),
-            )
-
-        user_message_obj = AIConversationMessage.objects.create(
-            conversation=conversation,
-            role=AIConversationMessage.Role.USER,
-            content=latest_user_message,
-            metadata={},
+        # ── Gérer la conversation ──────────────────────────────────────────────
+        conversation = self._get_or_create_conversation(
+            company, request.user, conversation_id, latest_user_message
         )
+        if isinstance(conversation, Response):
+            return conversation
 
+        # ── Mémoire conversationnelle ──────────────────────────────────────────
+        memory_service = MemoryService(str(conversation.id))
+        memory_context = memory_service.get_context_for_prompt()
+
+        # ── Contexte business (avec cache) ────────────────────────────────────
+        context = self._get_business_context(company, request.user, companies)
+
+        # ── LangGraph RAG Graph ───────────────────────────────────────────────
         try:
-            from django.conf import settings
-            if getattr(settings, "AI_RAG_ENABLED", False):
-                try:
-                    from .services.rag_service import RagService
-                    rag_result = RagService().run(
-                        latest_user_message,
-                        company,
-                        context,
-                        companies=companies,
-                    )
-                    if rag_result and rag_result.get("answer"):
-                        reply = rag_result
-                    else:
-                        reply = self._call_ai(system_prompt, api_messages, company)
-                except Exception as exc:
-                    logger.debug("[AIChatView] RAG failed: %s", exc)
-                    reply = self._call_ai(system_prompt, api_messages, company)
-            else:
-                reply = self._call_ai(system_prompt, api_messages, company)
+            from apps.ai_insights.services.langgraph_orchestrator import get_rag_graph
 
-            if reply:
-                with transaction.atomic():
-                    AIConversationMessage.objects.create(
-                        conversation=conversation,
-                        role=AIConversationMessage.Role.ASSISTANT,
-                        content=reply.get("answer", ""),
-                        metadata={
-                            "decision_needed":     bool(reply.get("decision_needed", False)),
-                            "decision_card":       reply.get("decision_card"),
-                            "suggested_followups": reply.get("suggested_followups", []),
-                            "urgency":             reply.get("urgency", "medium"),
-                            "topic":               reply.get("topic", "general"),
-                            "fallback":            False,
-                            "reply_to":            str(user_message_obj.id),
-                        },
-                    )
-                    conversation.save()
+            graph = get_rag_graph()
+
+            initial_state = {
+                "question":             latest_user_message,
+                "company_id":           company.id,
+                "company":              company,
+                "conversation_id":      str(conversation.id),
+                "language":             language,
+                "intent":               "",
+                "complexity":           "ambiguous",
+                "confidence":           0.0,
+                "sql_context":          None,
+                "vector_context":       None,
+                "t2s_context":          None,
+                "analyzer_context":     None,
+                "conversation_summary": memory_context,
+                "entity_memory":        memory_service.get_entity_memory(),
+                "final_context":        "",
+                "response":             None,
+                "error":                None,
+                "steps_taken":          [],
+                "total_latency_ms":     0,
+            }
+
+            # Exécuter le graph
+            final_state = graph.invoke(initial_state)
+            reply = final_state.get("response")
+
+            if reply and not reply.get("error"):
+                # Persister le message et mettre à jour la mémoire
+                self._persist_message(
+                    conversation, request.user, latest_user_message, reply,
+                    steps_taken=final_state.get("steps_taken", [])
+                )
+                memory_service.save_exchange(latest_user_message, reply)
+
                 return Response({
                     "conversation_id": str(conversation.id),
                     **reply,
-                    "fallback": False,
+                    "fallback":     False,
+                    "steps_taken":  final_state.get("steps_taken", []),
                 })
-        except Exception as exc:
-            logger.error("[AIChatView] AI call failed company=%s: %s", company.id, exc)
 
+        except Exception as exc:
+            logger.error("[AIChatView] LangGraph failed: %s", exc, exc_info=True)
+
+        # ── Fallback (inchangé) ────────────────────────────────────────────────
         fallback = self._build_fallback(latest_user_message, context)
-        with transaction.atomic():
-            AIConversationMessage.objects.create(
-                conversation=conversation,
-                role=AIConversationMessage.Role.ASSISTANT,
-                content=fallback.get("answer", ""),
-                metadata={
-                    "decision_needed":     bool(fallback.get("decision_needed", False)),
-                    "decision_card":       fallback.get("decision_card"),
-                    "suggested_followups": fallback.get("suggested_followups", []),
-                    "urgency":             fallback.get("urgency", "medium"),
-                    "topic":               fallback.get("topic", "general"),
-                    "fallback":            True,
-                    "reply_to":            str(user_message_obj.id),
-                },
-            )
-            conversation.save()
+        self._persist_message(conversation, request.user, latest_user_message, fallback)
+
         return Response({
             "conversation_id": str(conversation.id),
             **fallback,
             "fallback": True,
         })
 
+    def _get_business_context(self, company, user, companies) -> str:
+        """Contexte business avec cache court (5 min)."""
+        cache_key = f"biz_ctx:{company.id}"
+        cached = cache.get(cache_key)
+        if cached:
+            return cached
+
+        context = BusinessContextBuilder().build(
+            company,
+            user_role=getattr(user, "role", "manager") or "manager",
+            companies=companies,
+        )
+        cache.set(cache_key, context, timeout=300)  # 5 min
+        return context
+
+    def _get_or_create_conversation(self, company, user, conversation_id, message):
+        if conversation_id:
+            conv = AIConversation.objects.filter(
+                id=conversation_id, company=company, user=user
+            ).first()
+            if not conv:
+                return Response({"error": "Conversation not found."}, status=404)
+            return conv
+        return AIConversation.objects.create(
+            company=company,
+            user=user,
+            title=_conversation_title_from_text(message),
+        )
+
+    @staticmethod
+    def _persist_message(conversation, user, user_msg, reply, steps_taken=None):
+        """Persiste les messages avec transaction atomique."""
+        from django.db import transaction
+        with transaction.atomic():
+            AIConversationMessage.objects.create(
+                conversation=conversation,
+                role=AIConversationMessage.Role.USER,
+                content=user_msg,
+                metadata={},
+            )
+            AIConversationMessage.objects.create(
+                conversation=conversation,
+                role=AIConversationMessage.Role.ASSISTANT,
+                content=reply.get("answer", ""),
+                metadata={
+                    "decision_needed":     bool(reply.get("decision_needed", False)),
+                    "decision_card":       reply.get("decision_card"),
+                    "suggested_followups": reply.get("suggested_followups", []),
+                    "urgency":             reply.get("urgency", "medium"),
+                    "topic":               reply.get("topic", "general"),
+                    "steps_taken":         steps_taken or [],
+                },
+            )
+            conversation.save()
     @staticmethod
     def _get_authorized_companies(user) -> list:
         from apps.companies.models import Company
@@ -771,27 +766,7 @@ class AIChatView(APIView):
     def _call_ai(self, system_prompt: str, messages: list, company) -> dict | None:
         from django.conf import settings
 
-        anthropic_key = getattr(settings, "ANTHROPIC_API_KEY", "").strip()
         openai_key    = getattr(settings, "OPENAI_API_KEY", "").strip()
-
-        if anthropic_key:
-            try:
-                import anthropic as _a
-                client = _a.Anthropic(api_key=anthropic_key)
-                model  = getattr(settings, "AI_MODEL_SMART", "claude-haiku-4-5-20251001")
-                resp   = client.messages.create(
-                    model=model,
-                    max_tokens=self.MAX_TOKENS,
-                    system=system_prompt,
-                    messages=messages,
-                )
-                raw = resp.content[0].text if resp.content else ""
-                self._log_usage(company, resp.usage)
-                return self._parse_response(raw)
-            except ImportError:
-                logger.error("[AIChatView] anthropic package not installed")
-            except Exception as exc:
-                logger.error("[AIChatView] Anthropic failed company=%s: %s", company.id, exc)
 
         if openai_key:
             try:

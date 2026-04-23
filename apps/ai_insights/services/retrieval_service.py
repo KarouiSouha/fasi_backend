@@ -20,7 +20,7 @@ import logging
 import datetime
 import re
 
-from Backend.config import settings
+from django.conf import settings
 
 from .langgraph_workflow import LangGraphWorkflow
 from .query_weaver_service import QueryWeaverService
@@ -216,11 +216,21 @@ class RetrievalService:
         # ── CLIENTS (liste / stats) ───────────────────────────────────────────
         if t == "customers":
             cname = intent.get("customer_name", "")
+            top_n = max(1, min(intent.get("top_n", 5), 50))
+
+            customer_list = self.sql.get_customer_list(
+                company, search=cname or None, top_n=top_n)
+
+            # If parsed customer_name is too broad/noisy, avoid empty context by
+            # falling back to the first N customers.
+            if cname and not customer_list:
+                customer_list = self.sql.get_customer_list(
+                    company, search=None, top_n=top_n)
+
             return {
                 "mode":            "sql",
                 "customers_stats": self.sql.get_customers_stats(company),
-                "customer_list":   self.sql.get_customer_list(
-                    company, search=cname or None, top_n=20),
+                "customer_list":   customer_list,
             }
 
         # ── VENTES PRODUIT ────────────────────────────────────────────────────
@@ -441,16 +451,20 @@ class RetrievalService:
 
         # ORDRE : du plus spécifique au plus général
 
-        # 0. Explication de nomenclature comptable [FIX-8] — AVANT tout
+        # 0. Lookup direct client/code compte (doit passer avant nomenclature/aging)
+        if self._is_customer_lookup_query(t):
+            return {**base, "type": "customers"}
+
+        # 1. Explication de nomenclature comptable [FIX-8]
         if self._is_naming_explanation(t):
             term = self._extract_naming_term(t)
             return {**base, "type": "naming_explanation", "term": term}
 
-        # 1. Analytique global / dashboard
+        # 2. Analytique global / dashboard
         if self._is_analytical(t):
             return {**base, "type": "analytical"}
 
-        # 2. Créances / aging
+        # 3. Créances / aging
         if self._is_aging(t):
             # Sous-cas : croisement client inactif + dette [FIX-9]
             if self._is_customer_inactive_debt(t):
@@ -752,11 +766,19 @@ class RetrievalService:
         FIX-8 : Détecte les questions sur la nomenclature des fichiers ou termes comptables.
         Ex: "Pourquoi اعمار_الدمم ? Dammam en Libye ?"
         """
+        # Do not route customer/account lookups to terminology explanation.
+        customer_lookup_kw = [
+            "account code", "code compte", "compte client", "customer account",
+            "رقم الحساب", "رمز الحساب", "account_code", "accountcode",
+        ]
+        if any(k in t for k in customer_lookup_kw):
+            return False
+
         naming_kw = [
-            "nom du fichier", "pourquoi le nom", "qu'est-ce que", "que signifie",
+            "nom du fichier", "pourquoi le nom", "que signifie",
             "what does", "why is it called", "explication du nom",
-            "الدمم", "اعمار الدمم", "سبب التسمية", "ما معنى", "شرح الاسم",
-            "dammam", "what is", "signification", "etymology",
+            "اعمار الدمم", "سبب التسمية", "ما معنى", "شرح الاسم",
+            "dammam", "signification", "etymology",
         ]
         file_kw = [
             "اعمار", "fichier", "file", "الملف", "ملف",
@@ -937,6 +959,17 @@ class RetrievalService:
             "client", "customer", "عميل", "عملاء",
             "compte client", "liste client", "clients actifs",
             "combien de clients", "code compte",
+        ])
+
+    @staticmethod
+    def _is_customer_lookup_query(t: str) -> bool:
+        """Détecte les questions lookup client/code compte (nom -> code)."""
+        return any(k in t for k in [
+            "account code", "account-code", "customer account",
+            "code compte", "compte client", "account_code",
+            "رقم الحساب", "رمز الحساب", "كود الحساب",
+        ]) and any(k in t for k in [
+            "client", "customer", "عميل", "عملاء", "compte", "account",
         ])
 
     @staticmethod

@@ -270,7 +270,19 @@ class QueryWeaverService:
             pattern = rf"(?i){re.escape(kw)}\s+(?:named\s+|appelé\s+)?([^\?,\.{{}}]{{3,80}})"
             match = re.search(pattern, text)
             if match:
-                return match.group(1).strip()
+                candidate = match.group(1).strip()
+
+                # Ignore generic list/ranking phrasings that are not entity names.
+                generic_markers = [
+                    "first", "top", "list", "with their", "account codes",
+                    "customers", "customer", "clients", "client", "all",
+                    "premier", "premiers", "liste", "codes compte", "tous",
+                ]
+                c_low = candidate.lower()
+                if any(m in c_low for m in generic_markers):
+                    continue
+
+                return candidate
 
         # Fournisseurs connus (majuscules)
         known = re.search(r"\b(ELAN|LINKNET|LEGRAND|OWER\s*GROUP|ASTON)\b", text.upper())

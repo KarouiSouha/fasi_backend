@@ -8,6 +8,8 @@ Pillow>=10.4.0                          # Images
 openpyxl==3.1.2                         # Import/Export Excel
 openai>=1.0.0
 qdrant-client>=1.0.0
+langgraph>=0.0.1                        # LangGraph orchestration
+langchain-core>=0.1.0                   # LangChain core library
 celery==5.3.6                           # Tâches async
 redis==5.0.3                            # Broker Celery
 django-environ==0.11.2                  # Variables .env

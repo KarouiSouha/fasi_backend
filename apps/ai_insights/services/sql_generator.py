@@ -29,7 +29,7 @@ RÈGLES ABSOLUES :
 4. Limiter les résultats : toujours ajouter LIMIT (défaut 100, max 500)
 5. Pour les agrégations sans GROUP BY → OK (SUM, COUNT, AVG globaux)
 6. Pas de sous-requêtes corrélées complexes — préférer les CTEs (WITH)
-7. Les noms de tables sont en snake_case Django : app_modelname
+7. Utiliser EXACTEMENT les noms de tables fournis dans SCHÉMA
 8. Ne JAMAIS exposer des données d'une autre company_id
 
 FORMAT DE RÉPONSE — UNIQUEMENT ce JSON valide :
@@ -130,24 +130,8 @@ Réponds UNIQUEMENT avec le JSON demandé."""
         return messages
 
     def _call_llm(self, messages: list[dict]) -> str | None:
-        """Appelle OpenAI ou Anthropic selon la configuration."""
+        """Appelle OpenAI selon la configuration."""
 
-        # Priorité 1 : Anthropic (Claude — meilleur pour le SQL complexe)
-        if self._anthropic_key:
-            try:
-                import anthropic
-                client = anthropic.Anthropic(api_key=self._anthropic_key)
-                resp = client.messages.create(
-                    model=getattr(settings, "AI_MODEL_SMART", "claude-sonnet-4-6"),
-                    max_tokens=1000,
-                    system=SQL_GENERATION_SYSTEM_PROMPT,
-                    messages=messages,
-                )
-                return resp.content[0].text if resp.content else None
-            except Exception as exc:
-                logger.warning("[SQLGenerator] Anthropic failed: %s", exc)
-
-        # Priorité 2 : OpenAI
         if self._openai_key:
             try:
                 import openai
