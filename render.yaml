@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: fasi_backend
+    runtime: python
+    pythonVersion: "3.12"
+    buildCommand: pip install -r requirements/base.txt
+    startCommand: gunicorn config.wsgi:application
