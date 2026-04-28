@@ -2,7 +2,7 @@ Django==5.0.4
 djangorestframework==3.15.1
 djangorestframework-simplejwt==5.3.1    # JWT Auth
 django-cors-headers==4.3.1              # CORS pour React
-psycopg2-binary==2.9.9                  # Driver PostgreSQL
+psycopg[binary]>=3.1                  # Driver PostgreSQL
 django-filter==24.2                     # Filtres avancés
 Pillow>=10.4.0                          # Images
 openpyxl==3.1.2                         # Import/Export Excel
