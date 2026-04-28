@@ -26,10 +26,13 @@ DATABASES = {
 # CORS — autoriser le frontend Vercel
 # =============================================================================
 
-CORS_ALLOWED_ORIGINS = os.environ.get(
-    "CORS_ALLOWED_ORIGINS",
-    "https://weeg.vercel.app"
-).split(",")
+CORS_ALLOWED_ORIGINS = [
+    origin.strip().rstrip("/")
+    for origin in os.environ.get(
+        "CORS_ALLOWED_ORIGINS",
+        "https://weeg.vercel.app"
+    ).split(",")
+]
 
 CORS_ALLOW_CREDENTIALS = True
 # =============================================================================
