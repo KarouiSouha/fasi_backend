@@ -28,7 +28,7 @@ DATABASES = {
 
 CORS_ALLOWED_ORIGINS = os.environ.get(
     "CORS_ALLOWED_ORIGINS",
-    "https://front-web.vercel.app"
+    "https://weeg.vercel.app"
 ).split(",")
 
 CORS_ALLOW_CREDENTIALS = True
