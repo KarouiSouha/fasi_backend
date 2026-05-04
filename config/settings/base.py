@@ -371,3 +371,9 @@ AI_TEXT_TO_SQL_ENABLED = True       # Activer/désactiver le feature
 AI_TEXT_TO_SQL_TIMEOUT = 10_000     # Timeout PostgreSQL (ms)
 AI_TEXT_TO_SQL_MAX_ROWS = 500       # Lignes max retournées
 AI_TEXT_TO_SQL_LOG_SQL = True       # Logger les requêtes générées (audit)
+
+# =============================================================================
+# Email Verification API (Abstract Email Validation)
+# =============================================================================
+
+ABSTRACT_API_KEY = env("ABSTRACT_API_KEY", default="")

@@ -4,6 +4,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
 from apps.companies.models import Company
+from .email_verification import EmailVerificationService
 
 User = get_user_model()
 
@@ -221,8 +222,16 @@ class ManagerSignupSerializer(serializers.ModelSerializer):
 
     def validate_email(self, value):
         email = value.strip().lower()
+        
+        # Check if email already exists in database
         if User.objects.filter(email=email).exists():
             raise serializers.ValidationError("This email address is already in use.")
+        
+        # Verify email exists via Google/Abstract API
+        is_valid, error_message = EmailVerificationService.validate_email_for_signup(email)
+        if not is_valid:
+            raise serializers.ValidationError(error_message)
+        
         return email
 
     def validate_company_name(self, value):
