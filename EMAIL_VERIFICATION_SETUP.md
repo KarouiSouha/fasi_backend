@@ -1,13 +1,13 @@
 # Email Verification Setup Guide
 
 ## Overview
-This implementation adds email verification for manager signup to ensure that only valid, existing email addresses can be used during account creation. The system verifies emails using the Abstract Email Validation API.
+This implementation adds email verification for manager signup to ensure that only valid, existing email addresses can be used during account creation. The system verifies emails using the Abstract Email Reputation API.
 
 ## Implementation Details
 
 ### 1. **Email Verification Service** (`apps/authentication/email_verification.py`)
 - Validates email addresses exist and are deliverable
-- Uses Abstract Email Validation API for verification
+- Uses Abstract Email Reputation API for verification
 - Gracefully handles API failures (allows signup if service is unavailable)
 - Checks format, validity, and deliverability
 
@@ -22,12 +22,12 @@ When a manager attempts to sign up:
 ### 3. **Configuration Required**
 
 #### Step 1: Get Abstract API Key
-1. Visit: https://www.abstractapi.com/api/email-validation
+1. Visit: https://www.abstractapi.com/
 2. Sign up for a free account
-3. Create or select the **Email Validation** product
+3. Create or select the **Email Reputation** product
 4. Copy your API key
 
-> Important: use the key from the **Email Validation** product, not the Email Reputation product.
+> Important: use the key from the **Email Reputation** product.
 
 #### Step 2: Add to Backend Environment
 Add to your `.env` file:

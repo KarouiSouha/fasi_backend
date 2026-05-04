@@ -14,7 +14,7 @@ logger = logging.getLogger("django")
 class EmailVerificationService:
     """
     Service to verify if an email address actually exists
-    Uses Abstract API (free tier) or Google API
+    Uses Abstract Email Reputation API (free tier)
     """
 
     @staticmethod
@@ -46,8 +46,8 @@ class EmailVerificationService:
             }
         
         try:
-            # Use Abstract Email Validation API (free tier)
-            url = "https://emailvalidation.abstractapi.com/v1/"
+            # Use Abstract Email Reputation API (since your account only has Email Reputation)
+            url = "https://emailreputation.abstractapi.com/v1/"
             
             params = {
                 "api_key": abstract_api_key,
@@ -93,13 +93,18 @@ class EmailVerificationService:
                     "service_error": True,
                 }
             
-            is_valid = data.get("is_valid_format") and data.get("deliverability") in ["DELIVERABLE", "RISKY"]
+            email_deliverability = data.get("email_deliverability", {}) or {}
+            status = (email_deliverability.get("status") or "").lower()
+            is_format_valid = email_deliverability.get("is_format_valid", False)
+            is_smtp_valid = email_deliverability.get("is_smtp_valid", False)
+            
+            is_valid = is_format_valid and status in ["deliverable", "risky"]
             
             result = {
                 "is_valid": is_valid,
-                "reason": data.get("quality_score", "unknown"),
-                "deliverable": data.get("deliverability") == "DELIVERABLE",
-                "is_smtp_valid": data.get("is_smtp_valid", False),
+                "reason": email_deliverability.get("status_detail", "unknown"),
+                "deliverable": status == "deliverable",
+                "is_smtp_valid": is_smtp_valid,
                 "service_error": False,
             }
             
