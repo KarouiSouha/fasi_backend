@@ -196,6 +196,11 @@ class TokenService:
         Returns:
             Nombre de sessions révoquées.
         """
+        # Invalidate all existing access tokens immediately by bumping the user's token version.
+        # This forces every access token already issued to become invalid.
+        user.token_version += 1
+        user.save(update_fields=["token_version"])
+
         active_sessions = ActiveSession.objects.filter(user=user)
         count = active_sessions.count()
 
