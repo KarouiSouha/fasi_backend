@@ -55,9 +55,43 @@ class EmailVerificationService:
             }
             
             response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
             
-            data = response.json()
+            try:
+                data = response.json()
+            except ValueError:
+                data = {}
+            
+            if response.status_code != 200:
+                message = data.get("error", {}).get("message") if isinstance(data.get("error"), dict) else data.get("error")
+                reason = message or f"Abstract API returned HTTP {response.status_code}"
+                logger.error(f"Email verification failed for {email}: {reason}")
+
+                if response.status_code in (401, 403):
+                    return {
+                        "is_valid": False,
+                        "reason": "Email verification API key invalid or unauthorized.",
+                        "deliverable": False,
+                        "is_smtp_valid": False,
+                        "service_error": True,
+                    }
+
+                if 400 <= response.status_code < 500:
+                    return {
+                        "is_valid": False,
+                        "reason": "Invalid email verification request.",
+                        "deliverable": False,
+                        "is_smtp_valid": False,
+                        "service_error": True,
+                    }
+
+                # For server errors, keep fallback behavior to avoid blocking when the verification service is temporarily unavailable.
+                return {
+                    "is_valid": True,
+                    "reason": "Verification service error",
+                    "deliverable": True,
+                    "is_smtp_valid": True,
+                    "service_error": True,
+                }
             
             is_valid = data.get("is_valid_format") and data.get("deliverability") in ["DELIVERABLE", "RISKY"]
             
@@ -66,6 +100,7 @@ class EmailVerificationService:
                 "reason": data.get("quality_score", "unknown"),
                 "deliverable": data.get("deliverability") == "DELIVERABLE",
                 "is_smtp_valid": data.get("is_smtp_valid", False),
+                "service_error": False,
             }
             
             logger.info(f"Email verification for {email}: {result}")
@@ -77,15 +112,17 @@ class EmailVerificationService:
                 "is_valid": True,  # Allow on timeout
                 "reason": "Verification timeout",
                 "deliverable": True,
-                "is_smtp_valid": True
+                "is_smtp_valid": True,
+                "service_error": True,
             }
         except requests.exceptions.RequestException as e:
-            logger.error(f"Email verification error for {email}: {str(e)}")
+            logger.error(f"Email verification request error for {email}: {str(e)}")
             return {
-                "is_valid": True,  # Allow on error
+                "is_valid": True,  # Allow on network error
                 "reason": "Verification service error",
                 "deliverable": True,
-                "is_smtp_valid": True
+                "is_smtp_valid": True,
+                "service_error": True,
             }
         except Exception as e:
             logger.error(f"Unexpected error during email verification: {str(e)}")
@@ -93,7 +130,8 @@ class EmailVerificationService:
                 "is_valid": True,  # Allow on unexpected error
                 "reason": "Unexpected verification error",
                 "deliverable": True,
-                "is_smtp_valid": True
+                "is_smtp_valid": True,
+                "service_error": True,
             }
 
     @staticmethod
@@ -117,6 +155,12 @@ class EmailVerificationService:
         # Verify email exists
         verification_result = EmailVerificationService.verify_email(email)
         
+        if verification_result.get("service_error") and not verification_result["is_valid"]:
+            return False, (
+                "Email verification failed because the verification service is not configured correctly. "
+                "Please verify your Abstract API key and try again."
+            )
+
         if not verification_result["is_valid"]:
             return False, (
                 "The email address provided does not exist or is invalid. "

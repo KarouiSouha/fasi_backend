@@ -24,7 +24,10 @@ When a manager attempts to sign up:
 #### Step 1: Get Abstract API Key
 1. Visit: https://www.abstractapi.com/api/email-validation
 2. Sign up for a free account
-3. Copy your API key
+3. Create or select the **Email Validation** product
+4. Copy your API key
+
+> Important: use the key from the **Email Validation** product, not the Email Reputation product.
 
 #### Step 2: Add to Backend Environment
 Add to your `.env` file:
