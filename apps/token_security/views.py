@@ -1,6 +1,8 @@
 import logging
+from django.contrib.auth import get_user_model
 from django.utils.translation import gettext_lazy as _
 from rest_framework import status
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -15,6 +17,7 @@ from .serializers import (
 from .services import TokenService
 from .tokens import CustomRefreshToken
 from .utils import get_client_ip
+from .validators import BlacklistValidator, TokenVersionValidator, DeviceValidator
 
 security_logger = logging.getLogger("security")
 
@@ -137,56 +140,127 @@ class LoginView(APIView):
         }
         return status_messages.get(user.status)
 
-
+ 
 class RefreshView(APIView):
     """
     POST /api/auth/token/refresh/
-
-    Renews the access token using refresh token rotation.
-    The old refresh token is immediately revoked and a new one is issued.
-
-    Request body:
-        - refresh : current refresh token
-
-    Success response (200):
-        - access  : new access token
-        - refresh : new refresh token
-
-    Possible errors:
-        - 400 : missing or invalid refresh token
-        - 401 : token expired, revoked, or reused (attack detected)
+ 
+    ── CHANGES vs original ──────────────────────────────────────────────────
+    Two guards added BEFORE rotation:
+ 
+    1. Blacklist check
+       logout-all blacklists every refresh-token JTI. Without this check,
+       the web could still call this endpoint and receive fresh tokens,
+       effectively ignoring the global logout.
+ 
+    2. token_version check
+       logout-all also increments user.token_version. Checking it here means
+       any device whose token_version is stale is rejected immediately, even
+       if its JTI was not yet in the blacklist (e.g. race condition).
+ 
+    Both guards return 401, which the web client handles by clearing
+    localStorage and redirecting to /login (see refreshAccessToken in api.ts).
+    ─────────────────────────────────────────────────────────────────────────
     """
     permission_classes = [AllowAny]
-
+ 
     def post(self, request):
         serializer = TokenRefreshInputSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
+ 
         raw_refresh_token = serializer.validated_data["refresh"]
-
+ 
         try:
-            # Decode and validate the refresh token
+            # Decode & verify JWT signature / expiry
             refresh_token = CustomRefreshToken(raw_refresh_token)
             token_payload = refresh_token.payload
-
-            # Rotate: revoke old token and generate new one
+            token_jti     = refresh_token["jti"]
+ 
+            # ── Guard 1: blacklist ────────────────────────────────────────
+            # logout-all / revoke-session blacklists the JTI server-side.
+            # Without this check the web simply gets new tokens and stays
+            # logged in despite the global logout.
+            if TokenBlacklist.objects.filter(token_jti=token_jti).exists():
+                security_logger.info(
+                    f"[RefreshView] Rejected blacklisted JTI {token_jti[:12]}…"
+                )
+                return Response(
+                    {
+                        "error": "Your session has been revoked. Please log in again.",
+                        "code":  "token_blacklisted",
+                    },
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+ 
+            # ── Guard 2: token_version ────────────────────────────────────
+            # logout-all increments user.token_version. Any token issued
+            # before that bump is now stale and must be rejected.
+            from django.contrib.auth import get_user_model
+            User     = get_user_model()
+            user_id  = token_payload.get("user_id")
+            try:
+                user = User.objects.get(id=user_id)
+            except User.DoesNotExist:
+                return Response(
+                    {"error": "User not found.", "code": "user_not_found"},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+ 
+            token_version = token_payload.get("token_version")
+            if token_version is not None and int(token_version) != user.token_version:
+                security_logger.info(
+                    f"[RefreshView] Stale token_version for {user.email}: "
+                    f"token={token_version} db={user.token_version}"
+                )
+                return Response(
+                    {
+                        "error": "Session expired due to a security event. Please log in again.",
+                        "code":  "token_version_mismatch",
+                    },
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+ 
+            # ── Rotate ───────────────────────────────────────────────────
             new_tokens = TokenService.rotate_refresh_token(
                 old_refresh_token_payload=token_payload,
                 request=request,
             )
             return Response(new_tokens, status=status.HTTP_200_OK)
-
+ 
         except ValueError as e:
-            # Token reuse detected: all tokens revoked
+            # Token reuse detected — TokenService already revoked everything
             return Response(
                 {"error": str(e), "code": "token_reuse_detected"},
                 status=status.HTTP_401_UNAUTHORIZED,
             )
         except TokenError as e:
             raise InvalidToken(e.args[0])
-
-
+ 
+ 
+class LogoutView(APIView):
+    """POST /api/auth/logout/ — unchanged."""
+    permission_classes = [IsAuthenticated]
+ 
+    def post(self, request):
+        raw_refresh_token = request.data.get("refresh")
+        if not raw_refresh_token:
+            return Response(
+                {"error": "Refresh token is required to log out."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            refresh_token = CustomRefreshToken(raw_refresh_token)
+            TokenService.revoke_token(
+                token_jti=refresh_token["jti"],
+                user=request.user,
+                token_type="refresh",
+                reason="logout",
+            )
+            return Response({"message": "Successfully logged out."}, status=status.HTTP_200_OK)
+        except TokenError:
+            return Response({"error": "Invalid refresh token."}, status=status.HTTP_400_BAD_REQUEST)
+ 
 class LogoutView(APIView):
     """
     POST /api/auth/logout/
