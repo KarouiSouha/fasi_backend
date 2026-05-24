@@ -64,3 +64,4 @@ class CanResetPassword(BasePermission):
             )
 
         return False
+    

@@ -112,15 +112,11 @@ class ExcelUploadView(APIView):
     Automatically detects the file type and triggers the appropriate parser.
     Creates an ImportLog entry and returns the result.
 
-    Access rules:
-        - Admin   : can import any file type
-        - Manager : can import any file type for their company
-        - Agent   : can import movements and inventory only
     """
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
 
-    AGENT_ALLOWED_TYPES = {"movements", "inventory"}
+    AGENT_ALLOWED_TYPES = {"movements", "inventory", "customers", "branches", "aging"}
 
     def post(self, request):
         serializer = ImportUploadSerializer(data=request.data)
