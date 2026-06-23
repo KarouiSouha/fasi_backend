@@ -425,17 +425,22 @@ class AgingHistoricalTrendView(APIView):
 class AgingCustomerGrowthView(APIView):
     """
     GET /api/aging/customer-growth/
- 
-    Calcule le nombre de clients par année (un snapshot par an) et ajoute :
- 
-      growth_rate          — % vs année précédente  (inchangé, pour le tableau)
-      growth_rate_vs_5y    — % entre l'année courante et (année courante − 5)
-                             NULL si l'année de référence n'est pas disponible
-      is_5y_comparison     — true sur la ligne de l'année la plus récente
- 
-    L'année de référence (−5 ans) est déterminée dynamiquement : si
-    les données couvrent [2019, 2020, 2021, 2022, 2023, 2024] et que
-    l'année la plus récente est 2024, la comparaison est 2024 vs 2019.
+
+    Calculates the number of customers per year (one snapshot per year) and adds:
+
+        growth_rate          — % compared to the previous year
+                            (unchanged, used for the table)
+
+        growth_rate_vs_5y    — % change between the current year and
+                            (current year − 5)
+                            NULL if the reference year is not available
+
+        is_5y_comparison     — true on the most recent year's record
+
+    The reference year (−5 years) is determined dynamically. For example,
+    if the available data covers [2019, 2020, 2021, 2022, 2023, 2024] and
+    the most recent year is 2024, the comparison is calculated between
+    2024 and 2019.
     """
     permission_classes = [IsAuthenticated]
  

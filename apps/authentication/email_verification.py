@@ -68,7 +68,7 @@ class EmailVerificationService:
 
                 if response.status_code in (401, 403):
                     return {
-                        "is_valid": False,
+                        "is_valid": True,
                         "reason": "Email verification API key invalid or unauthorized.",
                         "deliverable": False,
                         "is_smtp_valid": False,

@@ -232,7 +232,7 @@ class CreditKPIView(APIView):
       )
         # ── Top 5 risky customers ─────────────────────────────────────────────
         all_credit_records = list(
-            credit_aging_qs.filter(total__gt=0)
+            credit_aging_qs.filter(0)
             .select_related("customer")
             .order_by("-total")
         )

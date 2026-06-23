@@ -12,33 +12,33 @@ security_logger = logging.getLogger("security")
 
 class TokenService:
     """
-    Couche de service centralisée pour toutes les opérations sur les tokens JWT.
+    Centralized service layer for all JWT token operations.
 
-    Cette classe est le seul endroit où les tokens sont créés, rotés, ou révoqués.
-    Aucune vue ne doit manipuler directement les tokens sans passer par ce service.
+    This class is the single place where tokens are created, rotated, or revoked.
+    No view should manipulate tokens directly without going through this service.
     """
 
     @staticmethod
     def issue_tokens(user, request) -> dict:
         """
-        Génère une paire access + refresh token au moment du login.
-        Crée une session active associée à l'appareil et à l'IP.
+        Generates an access + refresh token pair at login time.
+        Creates an active session associated with the device and IP.
 
         Args:
-            user    : instance User authentifiée
-            request : requête HTTP Django (pour extraire IP et device)
+            user    : authenticated User instance
+            request : Django HTTP request (to extract IP and device)
 
         Returns:
-            dict contenant :
-                - access  : access token JWT signé
-                - refresh : refresh token JWT signé
-                - session_id : UUID de la session créée
+            dict containing:
+                - access     : signed JWT access token
+                - refresh    : signed JWT refresh token
+                - session_id : UUID of the created session
         """
         ip_address = get_client_ip(request)
         device_fingerprint = get_device_fingerprint(request)
         device_name = parse_device_name(request.META.get("HTTP_USER_AGENT", ""))
 
-        # Génération des tokens enrichis
+        # Generate enriched tokens
         refresh_token = CustomRefreshToken.for_user_with_context(
             user=user,
             device_fingerprint=device_fingerprint,
@@ -46,13 +46,13 @@ class TokenService:
         )
         access_token = refresh_token.access_token
 
-        # Enrichissement de l'access token avec les données de rôle
+        # Enrich the access token with role data
         access_token["role"] = user.role
         access_token["permissions"] = user.permissions_list
         access_token["token_version"] = user.token_version
         access_token["company_id"] = str(user.company_id) if user.company_id else None
 
-        # Création de la session active en base de données
+        # Create the active session in the database
         session = ActiveSession.objects.create(
             user=user,
             refresh_token_jti=refresh_token["jti"],
@@ -62,8 +62,8 @@ class TokenService:
         )
 
         security_logger.info(
-            f"Nouvelle session créée pour [{user.email}] "
-            f"depuis {ip_address} sur {device_name}."
+            f"New session created for [{user.email}] "
+            f"from {ip_address} on {device_name}."
         )
 
         return {
@@ -75,21 +75,21 @@ class TokenService:
     @staticmethod
     def rotate_refresh_token(old_refresh_token_payload: dict, request) -> dict:
         """
-        Effectue la rotation d'un refresh token :
-            1. Vérifie que l'ancien refresh token n'a pas déjà été utilisé (token reuse attack)
-            2. Blackliste l'ancien token
-            3. Génère un nouveau refresh token
-            4. Met à jour la session active
+        Performs refresh token rotation:
+            1. Checks that the old refresh token has not already been used (token reuse attack)
+            2. Blacklists the old token
+            3. Generates a new refresh token
+            4. Updates the active session
 
         Args:
-            old_refresh_token_payload : payload décodé de l'ancien refresh token
-            request                   : requête HTTP courante
+            old_refresh_token_payload : decoded payload of the old refresh token
+            request                   : current HTTP request
 
         Returns:
-            dict contenant le nouvel access token et le nouveau refresh token.
+            dict containing the new access token and the new refresh token.
 
         Raises:
-            ValueError si l'ancien JTI a déjà été utilisé (attaque détectée).
+            ValueError if the old JTI has already been used (attack detected).
         """
         from django.contrib.auth import get_user_model
         User = get_user_model()
@@ -97,24 +97,24 @@ class TokenService:
         old_jti = old_refresh_token_payload["jti"]
         user_id = old_refresh_token_payload["user_id"]
 
-        # Détection d'une tentative de réutilisation d'un ancien refresh token
+        # Detect an attempt to reuse an old refresh token
         if RefreshTokenRotation.objects.filter(old_token_jti=old_jti).exists():
-            # Révocation immédiate de TOUS les tokens de l'utilisateur
+            # Immediately revoke ALL tokens for the user
             user = User.objects.get(id=user_id)
             TokenService.revoke_all_user_tokens(user, reason="token_reuse")
 
             security_logger.critical(
-                f"ATTAQUE DÉTECTÉE : réutilisation d'un ancien refresh token "
-                f"pour l'utilisateur [{user.email}]. "
-                f"Tous ses tokens ont été révoqués."
+                f"ATTACK DETECTED: old refresh token reuse "
+                f"for user [{user.email}]. "
+                f"All tokens have been revoked."
             )
-            raise ValueError("Refresh token déjà utilisé. Tous vos tokens ont été révoqués par mesure de sécurité.")
+            raise ValueError("Refresh token already used. All your tokens have been revoked as a security measure.")
 
         user = User.objects.get(id=user_id)
         ip_address = get_client_ip(request)
         device_fingerprint = get_device_fingerprint(request)
 
-        # Génération du nouveau refresh token
+        # Generate the new refresh token
         new_refresh_token = CustomRefreshToken.for_user_with_context(
             user=user,
             device_fingerprint=device_fingerprint,
@@ -126,7 +126,7 @@ class TokenService:
         new_access_token["token_version"] = user.token_version
         new_access_token["company_id"] = str(user.company_id) if user.company_id else None
 
-        # Enregistrement de la rotation
+        # Record the rotation
         RefreshTokenRotation.objects.create(
             user=user,
             old_token_jti=old_jti,
@@ -135,7 +135,7 @@ class TokenService:
             device_fingerprint=device_fingerprint,
         )
 
-        # Blacklist de l'ancien refresh token
+        # Blacklist the old refresh token
         TokenService._blacklist_jti(
             jti=old_jti,
             user=user,
@@ -143,7 +143,7 @@ class TokenService:
             reason="logout",
         )
 
-        # Mise à jour de la session active avec le nouveau JTI
+        # Update the active session with the new JTI
         ActiveSession.objects.filter(
             user=user,
             refresh_token_jti=old_jti,
@@ -157,13 +157,13 @@ class TokenService:
     @staticmethod
     def revoke_token(token_jti: str, user, token_type: str = "refresh", reason: str = "logout") -> None:
         """
-        Révoque un token spécifique et supprime la session associée.
+        Revokes a specific token and deletes the associated session.
 
         Args:
-            token_jti  : identifiant unique du token à révoquer
-            user       : propriétaire du token
+            token_jti  : unique identifier of the token to revoke
+            user       : token owner
             token_type : "access" | "refresh" | "temporary"
-            reason     : motif de révocation
+            reason     : revocation reason
         """
         TokenService._blacklist_jti(
             jti=token_jti,
@@ -172,7 +172,7 @@ class TokenService:
             reason=reason,
         )
 
-        # Suppression de la session active liée à ce refresh token
+        # Delete the active session linked to this refresh token
         if token_type == "refresh":
             ActiveSession.objects.filter(
                 user=user,
@@ -180,21 +180,21 @@ class TokenService:
             ).delete()
 
         security_logger.info(
-            f"Token révoqué pour [{user.email}] - Raison : {reason}."
+            f"Token revoked for [{user.email}] - Reason: {reason}."
         )
 
     @staticmethod
     def revoke_all_user_tokens(user, reason: str = "logout_all") -> int:
         """
-        Révoque toutes les sessions actives d'un utilisateur.
-        Utilisé lors du logout global ou après détection d'activité suspecte.
+        Revokes all active sessions for a user.
+        Used during global logout or after suspicious activity is detected.
 
         Args:
-            user   : utilisateur dont tous les tokens sont révoqués
-            reason : motif de révocation
+            user   : user whose tokens are all revoked
+            reason : revocation reason
 
         Returns:
-            Nombre de sessions révoquées.
+            Number of revoked sessions.
         """
         # Invalidate all existing access tokens immediately by bumping the user's token version.
         # This forces every access token already issued to become invalid.
@@ -215,8 +215,8 @@ class TokenService:
         active_sessions.delete()
 
         security_logger.warning(
-            f"Toutes les sessions révoquées pour [{user.email}] "
-            f"({count} sessions). Raison : {reason}."
+            f"All sessions revoked for [{user.email}] "
+            f"({count} sessions). Reason: {reason}."
         )
 
         return count
@@ -224,16 +224,16 @@ class TokenService:
     @staticmethod
     def get_active_sessions(user) -> list:
         """
-        Retourne la liste des sessions actives de l'utilisateur.
+        Returns the list of active sessions for the user.
 
         Returns:
-            Liste de dicts contenant les informations de chaque session.
+            List of dicts containing information about each session.
         """
         sessions = ActiveSession.objects.filter(user=user).order_by("-last_activity")
         return [
             {
                 "session_id": str(session.id),
-                "device_name": session.device_name or "Appareil inconnu",
+                "device_name": session.device_name or "Unknown device",
                 "ip_address": session.ip_address,
                 "last_activity": session.last_activity,
                 "created_at": session.created_at,
@@ -245,14 +245,14 @@ class TokenService:
     @staticmethod
     def issue_temporary_token(user, action: str) -> str:
         """
-        Génère un token temporaire pour le reset de mot de passe ou la vérification d'email.
+        Generates a temporary token for password reset or email verification.
 
         Args:
-            user   : utilisateur concerné
+            user   : user concerned
             action : "password_reset" | "email_verification"
 
         Returns:
-            Token temporaire sous forme de chaîne signée.
+            Temporary token as a signed string.
         """
         token = TemporaryToken.for_user_action(user=user, action=action)
         return str(token)
@@ -260,13 +260,13 @@ class TokenService:
     @staticmethod
     def _blacklist_jti(jti: str, user, token_type: str, reason: str) -> None:
         """
-        Méthode interne : ajoute un JTI à la blacklist.
-        Évite les doublons grâce à get_or_create.
+        Internal method: adds a JTI to the blacklist.
+        Avoids duplicates via get_or_create.
         """
         from django.utils import timezone as tz
         from datetime import timedelta
 
-        # Calcul de la date d'expiration selon le type de token
+        # Calculate expiry date based on token type
         lifetimes = {
             "access": timedelta(minutes=60),
             "refresh": timedelta(days=7),

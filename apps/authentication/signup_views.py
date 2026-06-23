@@ -18,6 +18,9 @@ from .serializers import (
     ConfirmPasswordResetSerializer,
 )
 from .services import EmailService, UserService
+from apps.token_security.services import TokenService
+from apps.token_security.tokens import TemporaryToken
+from rest_framework_simplejwt.exceptions import TokenError
 
 logger = logging.getLogger("django")
 User = get_user_model()
@@ -34,15 +37,14 @@ class ManagerSignupView(APIView):
         manager = serializer.save()
 
         EmailService.send_admin_new_manager_request(manager)
+
         logger.info(f"[SIGNUP] Manager registered: {manager.email} | Admin notification email sent.")
 
         return Response(
             {
-                "message": (
-                    "Your account has been successfully created. "
-                    "An administrator will review your request. "
-                    "You will receive an email as soon as your account is activated."
-                ),
+                "message": "Your account has been successfully created. "
+                        "An administrator will review your request. "
+                        "You will receive an email as soon as your account is activated.",
                 "status": "pending",
             },
             status=status.HTTP_201_CREATED,

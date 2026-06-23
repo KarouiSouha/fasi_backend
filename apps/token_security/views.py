@@ -138,7 +138,21 @@ class LoginView(APIView):
                 "message": "Your account has been suspended. Please contact an administrator.",
             },
         }
-        return status_messages.get(user.status)
+        # Basic status (pending/rejected/suspended)
+        base_status = status_messages.get(user.status)
+        if base_status:
+            return base_status
+
+        # Additional checks for managers:
+        # - `is_verified` must be True (admin approval)
+        if getattr(user, "is_manager", False):
+            if not getattr(user, "is_verified", False):
+                return {
+                    "code": "admin_not_approved",
+                    "message": "Your account is awaiting administrator approval.",
+                }
+
+        return None
 
  
 class RefreshView(APIView):

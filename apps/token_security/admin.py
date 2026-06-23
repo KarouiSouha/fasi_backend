@@ -47,9 +47,9 @@ class LoginAttemptAdmin(admin.ModelAdmin):
 
     def status_display(self, obj):
         if obj.is_successful:
-            return format_html('<span style="color: green;">✓ Succès</span>')
-        return format_html('<span style="color: red;">✗ Échec</span>')
-    status_display.short_description = "Statut"
+            return format_html('<span style="color: green;">✓ Success</span>')
+        return format_html('<span style="color: red;">✗ Failed</span>')
+    status_display.short_description = "Status"
 
     def has_add_permission(self, request):
         return False

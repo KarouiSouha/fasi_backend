@@ -5,8 +5,8 @@ from django.conf import settings
 
 class RefreshTokenRotation(models.Model):
     """
-    Enregistre chaque rotation de refresh token.
-    Permet de détecter la réutilisation d'un ancien refresh token (token reuse attack).
+    Records each refresh token rotation.
+    Allows detection of refresh token reuse attacks.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
@@ -17,11 +17,11 @@ class RefreshTokenRotation(models.Model):
     old_token_jti = models.CharField(
         max_length=255,
         unique=True,
-        help_text="JTI (JWT ID) de l'ancien refresh token révoqué lors de la rotation.",
+        help_text="JTI (JWT ID) of the old refresh token revoked during rotation.",
     )
     new_token_jti = models.CharField(
         max_length=255,
-        help_text="JTI du nouveau refresh token généré après rotation.",
+        help_text="JTI of the new refresh token generated after rotation.",
     )
     rotated_at = models.DateTimeField(auto_now_add=True)
     ip_address = models.GenericIPAddressField(null=True, blank=True)
@@ -30,24 +30,24 @@ class RefreshTokenRotation(models.Model):
     class Meta:
         db_table = "token_refresh_rotation"
         ordering = ["-rotated_at"]
-        verbose_name = "Rotation Refresh Token"
-        verbose_name_plural = "Rotations Refresh Tokens"
+        verbose_name = "Refresh Token Rotation"
+        verbose_name_plural = "Refresh Token Rotations"
 
     def __str__(self):
-        return f"Rotation [{self.user.email}] à {self.rotated_at}"
+        return f"Rotation [{self.user.email}] at {self.rotated_at}"
 
 
 class TokenBlacklist(models.Model):
     """
-    Stocke les tokens révoqués (logout, logout-all, changement de mot de passe).
-    Vérifié à chaque requête via CustomJWTAuthentication.
+    Stores revoked tokens (logout, logout-all, password change).
+    Checked on every request via CustomJWTAuthentication.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     token_jti = models.CharField(
         max_length=255,
         unique=True,
         db_index=True,
-        help_text="JWT ID unique du token révoqué.",
+        help_text="Unique JWT ID of the revoked token.",
     )
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -65,18 +65,18 @@ class TokenBlacklist(models.Model):
     )
     revoked_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField(
-        help_text="Date d'expiration du token. Utilisé pour le nettoyage automatique via Celery.",
+        help_text="Token expiry date. Used for automatic cleanup via Celery.",
     )
     reason = models.CharField(
         max_length=100,
         choices=[
-            ("logout", "Déconnexion"),
-            ("logout_all", "Déconnexion de tous les appareils"),
-            ("password_changed", "Changement de mot de passe"),
-            ("password_reset", "Réinitialisation de mot de passe"),
-            ("admin_revoked", "Révocation par l'administrateur"),
-            ("suspicious_activity", "Activité suspecte détectée"),
-            ("token_reuse", "Réutilisation d'un ancien token"),
+            ("logout", "Logout"),
+            ("logout_all", "Logout from all devices"),
+            ("password_changed", "Password changed"),
+            ("password_reset", "Password reset"),
+            ("admin_revoked", "Revoked by administrator"),
+            ("suspicious_activity", "Suspicious activity detected"),
+            ("token_reuse", "Old token reused"),
         ],
         default="logout",
     )
@@ -84,8 +84,8 @@ class TokenBlacklist(models.Model):
     class Meta:
         db_table = "token_blacklist"
         ordering = ["-revoked_at"]
-        verbose_name = "Token Blacklisté"
-        verbose_name_plural = "Tokens Blacklistés"
+        verbose_name = "Blacklisted Token"
+        verbose_name_plural = "Blacklisted Tokens"
 
     def __str__(self):
         return f"Blacklist [{self.token_type}] {self.user.email} - {self.reason}"
@@ -93,9 +93,9 @@ class TokenBlacklist(models.Model):
 
 class ActiveSession(models.Model):
     """
-    Représente une session active : un utilisateur connecté sur un appareil précis.
-    Créée au login, supprimée au logout.
-    Permet à l'utilisateur de voir et révoquer ses sessions à distance.
+    Represents an active session: a user logged in on a specific device.
+    Created at login, deleted at logout.
+    Allows the user to view and remotely revoke their sessions.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
@@ -107,36 +107,36 @@ class ActiveSession(models.Model):
         max_length=255,
         unique=True,
         db_index=True,
-        help_text="JTI du refresh token lié à cette session.",
+        help_text="JTI of the refresh token linked to this session.",
     )
     device_fingerprint = models.CharField(
         max_length=255,
-        help_text="Empreinte hashée de l'appareil (User-Agent + autres données).",
+        help_text="Hashed fingerprint of the device (User-Agent + other data).",
     )
     device_name = models.CharField(
         max_length=255,
         null=True,
         blank=True,
-        help_text="Nom lisible de l'appareil (ex: Chrome sur Windows).",
+        help_text="Human-readable device name (e.g. Chrome on Windows).",
     )
     ip_address = models.GenericIPAddressField(
-        help_text="Adresse IP lors de la connexion.",
+        help_text="IP address at login time.",
     )
     last_activity = models.DateTimeField(
         auto_now=True,
-        help_text="Dernière activité détectée sur cette session.",
+        help_text="Last activity detected on this session.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     is_current = models.BooleanField(
         default=False,
-        help_text="Indique si c'est la session active de la requête courante.",
+        help_text="Indicates whether this is the active session for the current request.",
     )
 
     class Meta:
         db_table = "token_active_session"
         ordering = ["-last_activity"]
-        verbose_name = "Session Active"
-        verbose_name_plural = "Sessions Actives"
+        verbose_name = "Active Session"
+        verbose_name_plural = "Active Sessions"
 
     def __str__(self):
         return f"Session [{self.user.email}] - {self.device_name or self.ip_address}"
@@ -144,13 +144,13 @@ class ActiveSession(models.Model):
 
 class LoginAttempt(models.Model):
     """
-    Historique de toutes les tentatives de connexion (réussies ou échouées).
-    Utilisé par RateLimitLoginMiddleware pour bloquer les attaques par force brute.
+    History of all login attempts (successful or failed).
+    Used by RateLimitLoginMiddleware to block brute-force attacks.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     email = models.EmailField(
         db_index=True,
-        help_text="Email utilisé lors de la tentative (même si l'utilisateur n'existe pas).",
+        help_text="Email used during the attempt (even if the user does not exist).",
     )
     ip_address = models.GenericIPAddressField(db_index=True)
     user_agent = models.TextField(null=True, blank=True)
@@ -160,11 +160,11 @@ class LoginAttempt(models.Model):
         null=True,
         blank=True,
         choices=[
-            ("invalid_credentials", "Identifiants incorrects"),
-            ("account_pending", "Compte en attente d'approbation"),
-            ("account_rejected", "Compte rejeté"),
-            ("account_suspended", "Compte suspendu"),
-            ("rate_limited", "Trop de tentatives"),
+            ("invalid_credentials", "Invalid credentials"),
+            ("account_pending", "Account pending approval"),
+            ("account_rejected", "Account rejected"),
+            ("account_suspended", "Account suspended"),
+            ("rate_limited", "Too many attempts"),
         ],
     )
     attempted_at = models.DateTimeField(auto_now_add=True)
@@ -172,9 +172,9 @@ class LoginAttempt(models.Model):
     class Meta:
         db_table = "token_login_attempt"
         ordering = ["-attempted_at"]
-        verbose_name = "Tentative de Connexion"
-        verbose_name_plural = "Tentatives de Connexion"
+        verbose_name = "Login Attempt"
+        verbose_name_plural = "Login Attempts"
 
     def __str__(self):
-        status = "Succès" if self.is_successful else f"Échec ({self.failure_reason})"
-        return f"[{status}] {self.email} depuis {self.ip_address}"
+        status = "Success" if self.is_successful else f"Failed ({self.failure_reason})"
+        return f"[{status}] {self.email} from {self.ip_address}"

@@ -1,20 +1,20 @@
 """
 apps/data_import/services/excel_vector_ingest.py
 -------------------------------------------------
-Universal Vector Ingest Service — tous les types de fichiers Excel.
+Universal Vector Ingest Service — all Excel file types.
 
-Supporte :
-  - movements   : TOUS les types (ventes, achats, transferts, ajustements...)
-  - aging       : créances par bucket d'ancienneté
-  - inventory   : stocks par produit et par branche
-  - customers   : profil client + code compte
-  - branches    : liste des succursales
+Supports:
+  - movements   : ALL types (sales, purchases, transfers, adjustments...)
+  - aging       : receivables by aging bucket
+  - inventory   : stock by product and branch
+  - customers   : customer profile + account code
+  - branches    : branch list
 
-Architecture :
-  - Un builder de texte par type de fichier (_build_*_text)
-  - Traitement par lots de 20 pour éviter les timeouts Qdrant Cloud
-  - Pause de 0.5s entre lots pour stabilité réseau
-  - Extensible : ajouter un nouveau type = ajouter une méthode _build_*_text
+Architecture:
+  - One text builder per file type (_build_*_text)
+  - Batch processing in sets of 20 to avoid Qdrant Cloud timeouts
+  - 0.5s pause between batches for network stability
+  - Extensible: adding a new type = adding a _build_*_text method
 """
 
 import logging
@@ -41,19 +41,19 @@ class ExcelVectorIngestService:
             self.qdrant = None
             logger.warning("[VectorIngest] Qdrant unavailable: %s", exc)
 
-    # ── Point d'entrée principal ──────────────────────────────────────────────
+    # ── Main entry point ──────────────────────────────────────────────────────
 
     def ingest(self, company, file_type: str, date_range=None):
         """
-        Point d'entrée universel — appelé après chaque import Excel.
+        Universal entry point — called after each Excel import.
 
         Args:
-            company   : instance Company Django
+            company   : Django Company instance
             file_type : 'movements' | 'aging' | 'inventory' | 'customers' | 'branches'
-            date_range: [date_from, date_to] pour movements uniquement
+            date_range: [date_from, date_to] for movements only
         """
         if not self.qdrant:
-            logger.warning("[VectorIngest] Qdrant non disponible — indexation ignorée.")
+            logger.warning("[VectorIngest] Qdrant unavailable — indexing skipped.")
             return
 
         dispatcher = {
@@ -66,24 +66,24 @@ class ExcelVectorIngestService:
 
         handler = dispatcher.get(file_type)
         if not handler:
-            logger.warning("[VectorIngest] Type '%s' non supporté.", file_type)
+            logger.warning("[VectorIngest] Type '%s' not supported.", file_type)
             return
 
-        logger.info("[VectorIngest] Démarrage indexation type=%s company=%s", file_type, company.id)
+        logger.info("[VectorIngest] Starting indexing type=%s company=%s", file_type, company.id)
         handler(company, date_range=date_range)
 
-    # ── Méthode de compatibilité ascendante ───────────────────────────────────
+    # ── Backward compatibility method ─────────────────────────────────────────
 
     def index_movements(self, company, date_range=None):
-        """Rétrocompatibilité avec l'ancien appel dans views.py."""
+        """Backward compatibility with the legacy call in views.py."""
         self.ingest(company, "movements", date_range=date_range)
 
-    # ── MOVEMENTS — TOUS les types de mouvements ──────────────────────────────
+    # ── MOVEMENTS — ALL movement types ────────────────────────────────────────
 
     def _ingest_movements(self, company, date_range=None, **kwargs):
         from apps.transactions.models import MaterialMovement
 
-        # Tous les types de mouvements (pas seulement les ventes)
+        # All movement types (not just sales)
         query = MaterialMovement.objects.filter(company=company)
 
         if date_range and len(date_range) == 2 and date_range[0] and date_range[1]:
@@ -98,7 +98,7 @@ class ExcelVectorIngestService:
 
         rows = list(query.select_related("branch").order_by("movement_date")[:2000])
         if not rows:
-            logger.info("[VectorIngest] Aucun mouvement à indexer.")
+            logger.info("[VectorIngest] No movements to index.")
             return
 
         texts = [self._build_movement_text(m) for m in rows]
@@ -149,7 +149,7 @@ class ExcelVectorIngestService:
             .order_by("-uploaded_at").first()
         )
         if not snapshot:
-            logger.info("[VectorIngest] Aucun snapshot aging trouvé.")
+            logger.info("[VectorIngest] No aging snapshot found.")
             return
 
         records = list(AgingReceivable.objects.filter(snapshot=snapshot))
@@ -204,7 +204,7 @@ class ExcelVectorIngestService:
             .order_by("product_code", "branch_name")[:3000]
         )
         if not lines:
-            logger.info("[VectorIngest] Aucune ligne d'inventaire trouvée.")
+            logger.info("[VectorIngest] No inventory lines found.")
             return
 
         texts    = [self._build_inventory_text(l) for l in lines]
@@ -246,7 +246,7 @@ class ExcelVectorIngestService:
 
         customers = list(Customer.objects.filter(company=company, is_active=True)[:1000])
         if not customers:
-            logger.info("[VectorIngest] Aucun client trouvé.")
+            logger.info("[VectorIngest] No customers found.")
             return
 
         texts    = [self._build_customer_text(c) for c in customers]
@@ -283,7 +283,7 @@ class ExcelVectorIngestService:
 
         branches = list(Branch.objects.filter(is_active=True)[:200])
         if not branches:
-            logger.info("[VectorIngest] Aucune branche trouvée.")
+            logger.info("[VectorIngest] No branches found.")
             return
 
         texts    = [self._build_branch_text(b) for b in branches]
@@ -311,12 +311,12 @@ class ExcelVectorIngestService:
             f"Active: {'Yes' if b.is_active else 'No'}"
         )
 
-    # ── Méthode commune d'upsert par lots ─────────────────────────────────────
+    # ── Common batch upsert method ────────────────────────────────────────────
 
     def _batch_upsert(self, texts: list, ids: list, payloads: list, label: str):
         """
-        Envoie les vecteurs vers Qdrant par lots de BATCH_SIZE.
-        Gestion des erreurs par lot — un lot échoué n'arrête pas les suivants.
+        Sends vectors to Qdrant in batches of BATCH_SIZE.
+        Per-batch error handling — a failed batch does not stop the remaining ones.
         """
         total_indexed = 0
         total_batches = (len(texts) - 1) // BATCH_SIZE + 1
@@ -327,17 +327,17 @@ class ExcelVectorIngestService:
             batch_payloads = payloads[batch_start: batch_start + BATCH_SIZE]
             batch_num      = batch_start // BATCH_SIZE + 1
 
-            # Génération des embeddings
+            # Embedding generation
             try:
                 vectors = self.openai.embed_texts(batch_texts)
             except Exception as exc:
                 logger.warning(
-                    "[VectorIngest] Embedding échoué batch %d/%d (%s): %s",
+                    "[VectorIngest] Embedding failed batch %d/%d (%s): %s",
                     batch_num, total_batches, label, exc
                 )
                 continue
 
-            # Construction des points Qdrant
+            # Build Qdrant points
             points = [
                 {
                     "id":      bid,
@@ -348,19 +348,19 @@ class ExcelVectorIngestService:
                 in zip(batch_ids, vectors, batch_texts, batch_payloads)
             ]
 
-            # Upsert dans Qdrant
+            # Upsert into Qdrant
             try:
                 self.qdrant.upsert_documents(points)
                 total_indexed += len(points)
                 time.sleep(0.5)
             except Exception as exc:
                 logger.warning(
-                    "[VectorIngest] Qdrant upsert échoué batch %d/%d (%s): %s",
+                    "[VectorIngest] Qdrant upsert failed batch %d/%d (%s): %s",
                     batch_num, total_batches, label, exc
                 )
                 continue
 
         logger.info(
-            "[VectorIngest] ✅ %s — %d/%d documents indexés dans Qdrant.",
+            "[VectorIngest] ✅ %s — %d/%d documents indexed into Qdrant.",
             label, total_indexed, len(texts)
         )

@@ -33,6 +33,7 @@ urlpatterns = [
     path("signup/pending/",                      PendingManagersListView.as_view(),  name="pending-managers"),
     path("signup/review/<uuid:manager_id>/",     ApproveRejectManagerView.as_view(), name="review-manager"),
 
+
     # -------------------------------------------------------------------------
     # Profil & mot de passe
     # -------------------------------------------------------------------------

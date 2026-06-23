@@ -133,8 +133,8 @@ def detect_notifications_for_user(request):
 
 def get_company_id(request):
     """
-    Utilise l'ID de l'utilisateur connecté comme clé d'isolation.
-    Chaque user ne voit que ses propres notifications.
+    Uses the authenticated user's ID as the isolation key.
+    Each user can only view their own notifications.
     """
     return str(request.user.id)
 
@@ -236,8 +236,10 @@ def delete_notification(request, pk):
 @permission_classes([IsAuthenticated])
 def sync_alerts(request):
     """
-    Upsert des alertes depuis AlertsPage.
-    Utilise update_or_create sur (company_id, frontend_id) — aucun doublon.
+    Upserts alerts from AlertsPage.
+
+    Uses update_or_create with (company_id, frontend_id) as the unique key,
+    ensuring that no duplicate records are created.
     """
     company_id = get_company_id(request)
 
@@ -292,8 +294,9 @@ def sync_alerts(request):
 @permission_classes([IsAuthenticated])
 def mark_read(request):
     """
-    Body : { "ids": ["uuid1", "uuid2"] }  → marque les IDs spécifiés
-           { "all": true }                 → marque tout comme lu
+    Body:
+        { "ids": ["uuid1", "uuid2"] }  → marks the specified notifications as read
+        { "all": true }                → marks all notifications as read
     """
     company_id = get_company_id(request)
     serializer = MarkReadSerializer(data=request.data)

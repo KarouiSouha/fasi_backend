@@ -142,7 +142,7 @@ class StockKPIView(APIView):
                     "qty_sold": float(row["qty_sold"]),
                     "revenue":  float(row["revenue"]),
                 }
-
+    
         # ── 2. Stock Initial — ف.أول المدة, grouped by material_name ─────────
         opening_qs = (
             base_mvt

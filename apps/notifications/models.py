@@ -54,7 +54,7 @@ class Notification(models.Model):
             models.Index(fields=['company_id', 'alert_type']),
             models.Index(fields=['frontend_id']),
         ]
-        # Contrainte d'unicité sur frontend_id pour éviter les doublons en DB
+        # Uniqueness constraint on frontend_id to prevent duplicate records in the database
         constraints = [
             models.UniqueConstraint(
                 fields=['company_id', 'frontend_id'],

@@ -4,7 +4,6 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
 from apps.companies.models import Company
-from .email_verification import EmailVerificationService
 
 User = get_user_model()
 
@@ -202,7 +201,7 @@ class ManagerSignupSerializer(serializers.ModelSerializer):
     industry         = serializers.CharField(required=True, max_length=100)
     country          = serializers.CharField(required=True, max_length=100)
     city             = serializers.CharField(required=True, max_length=100)
-    current_erp      = serializers.CharField(required=False, allow_blank=True, max_length=100, default='')
+    current_erp      = serializers.CharField(read_only=True, default='AL Mizen', max_length=100)
 
     class Meta:
         model = User
@@ -226,11 +225,6 @@ class ManagerSignupSerializer(serializers.ModelSerializer):
         # Check if email already exists in database
         if User.objects.filter(email=email).exists():
             raise serializers.ValidationError("This email address is already in use.")
-        
-        # Verify email exists via Google/Abstract API
-        is_valid, error_message = EmailVerificationService.validate_email_for_signup(email)
-        if not is_valid:
-            raise serializers.ValidationError(error_message)
         
         return email
 
@@ -279,15 +273,16 @@ class ManagerSignupSerializer(serializers.ModelSerializer):
         industry     = validated_data.pop("industry")
         country      = validated_data.pop("country")
         city         = validated_data.pop("city")
-        current_erp  = validated_data.pop("current_erp", "")
+
+        current_erp = "AL Mizen"
 
         # Get or create Company, storing all new fields on creation
         company, created = Company.objects.get_or_create(
             name=company_name,
             defaults={
-                "industry":   industry,
-                "country":    country,
-                "city":       city,
+                "industry":    industry,
+                "country":     country,
+                "city":        city,
                 "current_erp": current_erp,
             },
         )

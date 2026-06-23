@@ -4,8 +4,8 @@ from .models import ActiveSession, LoginAttempt
 
 class ActiveSessionSerializer(serializers.ModelSerializer):
     """
-    Sérialise une session active pour affichage dans la liste des appareils connectés.
-    Utilisé par ActiveSessionsView et RevokeSessionView.
+    Serializes an active session for display in the connected devices list.
+    Used by ActiveSessionsView and RevokeSessionView.
     """
 
     class Meta:
@@ -23,8 +23,8 @@ class ActiveSessionSerializer(serializers.ModelSerializer):
 
 class LoginAttemptSerializer(serializers.ModelSerializer):
     """
-    Sérialise une tentative de connexion pour affichage dans l'admin.
-    Lecture seule, utilisé uniquement pour consultation.
+    Serializes a login attempt for display in the admin panel.
+    Read-only, used for consultation only.
     """
 
     class Meta:
@@ -42,19 +42,19 @@ class LoginAttemptSerializer(serializers.ModelSerializer):
 
 class TokenRefreshInputSerializer(serializers.Serializer):
     """
-    Valide le corps de la requête de rotation du refresh token.
+    Validates the request body for refresh token rotation.
     """
     refresh = serializers.CharField(
         required=True,
-        help_text="Refresh token JWT à renouveler.",
+        help_text="JWT refresh token to renew.",
     )
 
 
 class RevokeSessionInputSerializer(serializers.Serializer):
     """
-    Valide le corps de la requête de révocation d'une session à distance.
+    Validates the request body for remote session revocation.
     """
     session_id = serializers.UUIDField(
         required=True,
-        help_text="UUID de la session active à révoquer.",
+        help_text="UUID of the active session to revoke.",
     )

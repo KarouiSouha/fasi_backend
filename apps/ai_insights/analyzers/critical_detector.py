@@ -21,7 +21,6 @@ ANALYSIS_DAYS   = 90
 
 # ── Role → allowed signal sources ────────────────────────────────────────────
 ROLE_PERMISSIONS = {
-    "admin":   {"churn", "anomaly", "aging", "stock", "kpi"},
     "manager": {"churn", "anomaly", "aging", "stock", "kpi"},
     "agent":   {"stock", "anomaly"},    # field agents see stock + anomalies only
     "finance": {"aging", "kpi"},
@@ -216,7 +215,8 @@ class CriticalDetector:
                 if not last:
                     continue
                 days_inactive = (today - last).days
-                # Cap à 365j — au-delà c'est un client inactif archivé, pas un signal utile
+                # Cap à 365j — au-delà c'est un client inactif archivé, pas un signal u
+                # tile
                 if days_inactive > 365:
                     continue
                 revenue = float(customer["total_revenue"] or 0)

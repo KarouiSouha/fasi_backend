@@ -3,15 +3,15 @@ from rest_framework.permissions import BasePermission
 
 class IsAdmin(BasePermission):
     """
-    Autorise uniquement les utilisateurs avec le rôle 'admin'.
-    Le rôle est lu directement depuis le payload JWT sans requête DB.
+    Allows only users with the 'admin' role.
+    The role is read directly from the JWT payload without a DB query.
 
-    Utilisé pour :
-        - Approuver / rejeter les comptes managers
-        - Accéder aux logs de sécurité
-        - Gérer la configuration système
+    Used for:
+        - Approving / rejecting manager accounts
+        - Accessing security logs
+        - Managing system configuration
     """
-    message = "Accès réservé aux administrateurs."
+    message = "Access restricted to administrators."
 
     def has_permission(self, request, view):
         return (
@@ -23,16 +23,16 @@ class IsAdmin(BasePermission):
 
 class IsManager(BasePermission):
     """
-    Autorise uniquement les utilisateurs avec le rôle 'manager'.
-    Le rôle est lu directement depuis le payload JWT sans requête DB.
+    Allows only users with the 'manager' role.
+    The role is read directly from the JWT payload without a DB query.
 
-    Utilisé pour :
-        - Créer et gérer les comptes agents
-        - Accéder aux rapports détaillés
-        - Configurer les seuils d'alertes
-        - Réinitialiser le mot de passe des agents
+    Used for:
+        - Creating and managing agent accounts
+        - Accessing detailed reports
+        - Configuring alert thresholds
+        - Resetting agent passwords
     """
-    message = "Accès réservé aux managers."
+    message = "Access restricted to managers."
 
     def has_permission(self, request, view):
         return (
@@ -44,15 +44,15 @@ class IsManager(BasePermission):
 
 class IsAgent(BasePermission):
     """
-    Autorise uniquement les utilisateurs avec le rôle 'agent'.
-    Le rôle est lu directement depuis le payload JWT sans requête DB.
+    Allows only users with the 'agent' role.
+    The role is read directly from the JWT payload without a DB query.
 
-    Utilisé pour :
-        - Consulter les données de sa succursale
-        - Importer des fichiers Excel
-        - Recevoir et gérer les alertes
+    Used for:
+        - Viewing data from their branch
+        - Importing Excel files
+        - Receiving and managing alerts
     """
-    message = "Accès réservé aux agents."
+    message = "Access restricted to agents."
 
     def has_permission(self, request, view):
         return (
@@ -64,15 +64,15 @@ class IsAgent(BasePermission):
 
 class IsAdminOrManager(BasePermission):
     """
-    Autorise les utilisateurs avec le rôle 'admin' ou 'manager'.
+    Allows users with the 'admin' or 'manager' role.
 
-    Utilisé pour :
-        - Générer des rapports
-        - Planifier des rapports automatiques
-        - Configurer les alertes
-        - Réinitialiser les mots de passe
+    Used for:
+        - Generating reports
+        - Scheduling automatic reports
+        - Configuring alerts
+        - Resetting passwords
     """
-    message = "Accès réservé aux administrateurs et managers."
+    message = "Access restricted to administrators and managers."
 
     def has_permission(self, request, view):
         return (
@@ -84,12 +84,12 @@ class IsAdminOrManager(BasePermission):
 
 class IsManagerOrAgent(BasePermission):
     """
-    Autorise les utilisateurs avec le rôle 'manager' ou 'agent'.
+    Allows users with the 'manager' or 'agent' role.
 
-    Utilisé pour les ressources accessibles à tous les utilisateurs internes
-    sauf les opérations réservées à l'administrateur système.
+    Used for resources accessible to all internal users
+    except operations reserved for the system administrator.
     """
-    message = "Accès réservé aux managers et agents."
+    message = "Access restricted to managers and agents."
 
     def has_permission(self, request, view):
         return (
@@ -101,16 +101,16 @@ class IsManagerOrAgent(BasePermission):
 
 class HasPermission(BasePermission):
     """
-    Permission granulaire basée sur la liste de permissions de l'utilisateur.
-    La liste est lue depuis le payload JWT (champ 'permissions').
+    Granular permission based on the user's permission list.
+    The list is read from the JWT payload (field 'permissions').
 
-    Usage dans une vue :
+    Usage in a view:
         permission_classes = [IsAuthenticated, HasPermission]
         required_permission = "view-dashboard"
 
-    Les permissions disponibles sont définies dans le modèle User.
+    Available permissions are defined in the User model.
     """
-    message = "Vous n'avez pas la permission spécifique requise pour cette action."
+    message = "You do not have the specific permission required for this action."
     required_permission = None
 
     def has_permission(self, request, view):

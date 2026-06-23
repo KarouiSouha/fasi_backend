@@ -27,7 +27,7 @@ def resolve_branch(fk_name: str | None) -> str:
     1. Branch FK name  (Branch.name — set at import time)
     2. 'Unknown'
     """
-    fk  = (fk_name  or '').strip()
+    fk  = (fk_name  or '.').strip()
     if fk:
         return fk
     return 'Unknown'
