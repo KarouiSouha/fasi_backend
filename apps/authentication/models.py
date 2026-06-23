@@ -188,7 +188,16 @@ class User(AbstractUser):
         verbose_name="Email verified",
         help_text="True after admin verifies the email (for managers).",
     )
-
+    is_email_verified = models.BooleanField(
+        default=False,
+        verbose_name="Email address verified",
+        help_text=(
+            "True after the manager clicks the verification link in their inbox. "
+            "Required BEFORE the admin review step. "
+            "Not to be confused with is_verified (set by admin on approval)."
+         ),
+        )
+    
     # -------------------------------------------------------------------------
     # Metadata
     # -------------------------------------------------------------------------

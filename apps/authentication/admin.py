@@ -42,7 +42,7 @@ class UserAdmin(BaseUserAdmin):
         ),
         (
             "Role & Access",
-            {"fields": ("role", "status", "company", "is_verified", "rejection_reason")},
+            {"fields": ("role", "status", "company", "is_verified", "is_email_verified", "rejection_reason")},
         ),
         (
             "Granular Permissions",

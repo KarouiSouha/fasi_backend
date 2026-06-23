@@ -1,5 +1,20 @@
 """
 apps/authentication/signup_views.py
+
+UPDATED — v2 with email verification step.
+
+Manager signup flow:
+    1. POST /api/users/signup/
+       → Account created (status=PENDING, is_email_verified=False)
+       → Verification email sent to manager
+       → Response: 201 with "please verify your email" message
+
+    2. GET /api/users/verify-email/?token=<token>   (handled by email_verification_views.py)
+       → is_email_verified=True
+       → Admin notified
+       → Redirect to /signup/verified
+
+    3. Admin approves/rejects from dashboard
 """
 
 import logging
@@ -18,6 +33,7 @@ from .serializers import (
     ConfirmPasswordResetSerializer,
 )
 from .services import EmailService, UserService
+from .email_verification_views import _issue_and_send_verification
 from apps.token_security.services import TokenService
 from apps.token_security.tokens import TemporaryToken
 from rest_framework_simplejwt.exceptions import TokenError
@@ -36,16 +52,20 @@ class ManagerSignupView(APIView):
 
         manager = serializer.save()
 
-        EmailService.send_admin_new_manager_request(manager)
+        # Step 1: send email verification — do NOT notify admin yet
+        _issue_and_send_verification(manager)
 
-        logger.info(f"[SIGNUP] Manager registered: {manager.email} | Admin notification email sent.")
+        logger.info(f"[SIGNUP] Manager registered: {manager.email} | Verification email sent.")
 
         return Response(
             {
-                "message": "Your account has been successfully created. "
-                        "An administrator will review your request. "
-                        "You will receive an email as soon as your account is activated.",
-                "status": "pending",
+                "message": (
+                    "Your account has been successfully created. "
+                    "Please verify your email address. "
+                    "A verification email has been sent to you."
+                ),
+                "status": "email_verification_pending",
+                "email": manager.email,
             },
             status=status.HTTP_201_CREATED,
         )
@@ -65,6 +85,7 @@ class PendingManagersListView(APIView):
             User.objects.filter(
                 role=User.Role.MANAGER,
                 status=User.AccountStatus.PENDING,
+                is_email_verified=True,      # Only show email-verified managers
             )
             .select_related("company")
             .order_by("-created_at")
@@ -90,6 +111,13 @@ class ApproveRejectManagerView(APIView):
             return Response(
                 {"error": "Manager not found."},
                 status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Guard: cannot approve/reject an unverified manager
+        if not manager.is_email_verified:
+            return Response(
+                {"error": "This manager has not verified their email address yet."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         serializer = ApproveRejectManagerSerializer(data=request.data)

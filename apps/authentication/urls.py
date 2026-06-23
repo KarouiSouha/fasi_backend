@@ -16,40 +16,48 @@ from .signup_views import (
     RequestPasswordResetView,
     ConfirmPasswordResetView,
 )
-# NEW: Forgot password with verification code
 from .forgot_password_views import (
     ForgotPasswordRequestView,
     ForgotPasswordVerifyView,
     ForgotPasswordResetView,
+)
+# NEW: email verification for manager signup
+from .email_verification_views import (
+    VerifyManagerEmailView,
+    ResendVerificationEmailView,
 )
 
 app_name = "authentication"
 
 urlpatterns = [
     # -------------------------------------------------------------------------
-    # Signup & validation Manager
+    # Signup & Manager validation
     # -------------------------------------------------------------------------
     path("signup/",                              ManagerSignupView.as_view(),        name="manager-signup"),
     path("signup/pending/",                      PendingManagersListView.as_view(),  name="pending-managers"),
     path("signup/review/<uuid:manager_id>/",     ApproveRejectManagerView.as_view(), name="review-manager"),
 
+    # ── Email verification (NEW) ──────────────────────────────────────────────
+    # Step triggered by the link in the verification email
+    path("verify-email/",                        VerifyManagerEmailView.as_view(),        name="verify-email"),
+    # Resend verification email if expired / not received
+    path("resend-verification/",                 ResendVerificationEmailView.as_view(),   name="resend-verification"),
 
     # -------------------------------------------------------------------------
-    # Profil & mot de passe
+    # Profile & password
     # -------------------------------------------------------------------------
     path("profile/",                             ProfileView.as_view(),              name="profile"),
     path("change-password/",                     ChangePasswordView.as_view(),       name="change-password"),
     path("password-reset/request/",              RequestPasswordResetView.as_view(), name="password-reset-request"),
     path("password-reset/confirm/",              ConfirmPasswordResetView.as_view(), name="password-reset-confirm"),
+
     # -------------------------------------------------------------------------
-    # NEW: Forgot password (auto-service par code email — pour manager/agent)
+    # Forgot password (code by email — 3 steps)
     # -------------------------------------------------------------------------
-    # Step 1 : L'utilisateur entre son email → reçoit un code 6 chiffres
     path("forgot-password/request/",             ForgotPasswordRequestView.as_view(), name="forgot-password-request"),
-    # Step 2 : L'utilisateur vérifie son code → reçoit un token temporaire
     path("forgot-password/verify/",              ForgotPasswordVerifyView.as_view(),  name="forgot-password-verify"),
-    # Step 3 : L'utilisateur soumet son nouveau mot de passe avec le token
     path("forgot-password/reset/",               ForgotPasswordResetView.as_view(),   name="forgot-password-reset"),
+
     # -------------------------------------------------------------------------
     # Agents (manager)
     # -------------------------------------------------------------------------
@@ -58,10 +66,9 @@ urlpatterns = [
     path("agents/<uuid:agent_id>/",              AgentDetailView.as_view(),          name="agent-detail"),
 
     # -------------------------------------------------------------------------
-    # Gestion utilisateurs (admin)
+    # User management (admin)
     # -------------------------------------------------------------------------
     path("users/",                               AllUsersListView.as_view(),         name="user-list"),
     path("users/<uuid:user_id>/permissions/",    UpdateUserPermissionsView.as_view(),name="user-permissions"),
     path("users/<uuid:user_id>/status/",         UpdateUserStatusView.as_view(),     name="user-status"),
-    
 ]
