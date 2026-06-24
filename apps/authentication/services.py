@@ -362,27 +362,13 @@ class EmailService:
         msg.send(fail_silently=False)
 
     # ── ADD this method to EmailService ────────────────────────────────────────
- 
     @staticmethod
     def send_email_verification(manager, token: str) -> None:
-        """
-        Sends an email verification link to a newly registered manager.
-        Called right after account creation, BEFORE notifying the admin.
- 
-        Args:
-            manager: User instance (role=manager, is_email_verified=False)
-            token:   Secure URL-safe token stored in cache
-        """
-        from django.conf import settings
-        from django.core.mail import EmailMultiAlternatives
- 
-        frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173")
-        # The link points to the BACKEND verify endpoint, which then redirects to frontend
-        backend_url  = getattr(settings, "BACKEND_URL", "http://localhost:8000")
-        verify_url   = f"{backend_url}/api/users/verify-email/?token={token}"
- 
+        frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173").rstrip('/')
+        verify_url = f"{frontend_url}/signup/verify-email?token={token}"
+
         subject = "[WEEG] Please verify your email address"
- 
+
         text_content = (
             f"Hello {manager.first_name},\n\n"
             f"Thank you for creating your WEEG Manager account.\n\n"
@@ -392,15 +378,13 @@ class EmailService:
             f"If you did not create this account, you can safely ignore this email.\n\n"
             f"Best regards,\nThe WEEG team"
         )
- 
+
         html_content = f"""
         <!DOCTYPE html>
         <html>
         <head><meta charset="UTF-8"></head>
         <body style="font-family:Arial,sans-serif;background:#f4f4f4;margin:0;padding:20px;">
           <div style="max-width:600px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
- 
-            <!-- Header -->
             <div style="background:linear-gradient(135deg,#4f46e5,#7c3aed);padding:32px 40px;text-align:center;">
               <div style="display:inline-block;background:rgba(255,255,255,0.15);border-radius:12px;padding:12px 20px;margin-bottom:16px;">
                 <span style="color:#fff;font-size:28px;font-weight:900;letter-spacing:2px;">WEEG</span>
@@ -410,79 +394,53 @@ class EmailService:
               </div>
               <h1 style="color:#fff;margin:0;font-size:22px;font-weight:600;">Verify your email address</h1>
             </div>
- 
-            <!-- Body -->
             <div style="padding:40px;">
               <p style="color:#374151;font-size:16px;margin:0 0 8px;">Hello <strong>{manager.first_name}</strong>,</p>
               <p style="color:#6b7280;font-size:15px;margin:0 0 28px;line-height:1.6;">
                 Thank you for registering on <strong>WEEG</strong>.<br>
                 To complete your registration, please verify your email address by clicking the button below.
               </p>
- 
-              <!-- CTA -->
               <div style="text-align:center;margin:32px 0;">
                 <a href="{verify_url}"
-                   style="display:inline-block;background:linear-gradient(135deg,#4f46e5,#7c3aed);
+                  style="display:inline-block;background:linear-gradient(135deg,#4f46e5,#7c3aed);
                           color:#fff;font-size:16px;font-weight:700;
-                          padding:16px 40px;border-radius:10px;text-decoration:none;
-                          letter-spacing:0.3px;">
+                          padding:16px 40px;border-radius:10px;text-decoration:none;">
                   ✉️ Verify my email address
                 </a>
               </div>
- 
-              <!-- Expiry warning -->
               <div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;padding:12px 16px;margin:24px 0;text-align:center;">
                 <p style="color:#92400e;margin:0;font-size:13px;">
                   ⏰ This link expires in <strong>24 hours</strong>.
                 </p>
               </div>
- 
-              <!-- Next steps -->
               <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:20px 24px;margin-bottom:24px;">
                 <p style="color:#0369a1;font-size:14px;font-weight:600;margin:0 0 12px;">What happens next?</p>
                 <table style="width:100%;border-collapse:collapse;">
-                  <tr>
-                    <td style="padding:5px 0;color:#0369a1;font-size:13px;">
-                      1. Click the button above to verify your email
-                    </td>
-                  </tr>
-                  <tr>
-                    <td style="padding:5px 0;color:#0369a1;font-size:13px;">
-                      2. An administrator will review your account request
-                    </td>
-                  </tr>
-                  <tr>
-                    <td style="padding:5px 0;color:#0369a1;font-size:13px;">
-                      3. You will receive a confirmation email once approved
-                    </td>
-                  </tr>
+                  <tr><td style="padding:5px 0;color:#0369a1;font-size:13px;">1. Click the button above to verify your email</td></tr>
+                  <tr><td style="padding:5px 0;color:#0369a1;font-size:13px;">2. An administrator will review your account request</td></tr>
+                  <tr><td style="padding:5px 0;color:#0369a1;font-size:13px;">3. You will receive a confirmation email once approved</td></tr>
                 </table>
               </div>
- 
               <p style="color:#9ca3af;font-size:12px;text-align:center;margin:0;">
                 If you did not create this account, please ignore this email.<br>
                 You can also copy this link: <a href="{verify_url}" style="color:#4f46e5;">{verify_url}</a>
               </p>
             </div>
- 
-            <!-- Footer -->
             <div style="background:#f9fafb;border-top:1px solid #e5e7eb;padding:20px 40px;text-align:center;">
               <p style="color:#9ca3af;font-size:12px;margin:0;">
                 WEEG — Financial Analytics & System Intelligence<br>
                 This is an automated email, please do not reply.
               </p>
             </div>
- 
           </div>
         </body>
         </html>
         """
- 
+
         msg = EmailMultiAlternatives(subject, text_content, settings.DEFAULT_FROM_EMAIL, [manager.email])
         msg.attach_alternative(html_content, "text/html")
         msg.send(fail_silently=False)
         logger.info(f"[EMAIL VERIFY] Verification email sent to {manager.email}")
-
 class UserService:
     @staticmethod
     def approve_manager(manager: User, admin: User) -> None:

@@ -6,19 +6,19 @@ Email verification step for new Manager signups.
 Flow:
     POST /api/users/signup/
         → Account created (status=PENDING, is_email_verified=False)
-        → Email sent to manager with a verification link
+        → Email sent to manager with a link to the FRONTEND verify page
 
-    GET /api/users/verify-email/?token=<token>
-        → Token validated, is_email_verified=True
+    Frontend page /signup/verify-email?token=<token>
+        → Calls GET /api/users/verify-email/?token=<token> via fetch/axios
+        → Backend validates token, sets is_email_verified=True, returns JSON
         → Admin notified of the new manager request
-        → Manager redirected to frontend with success flag
+        → Frontend shows "Account created! Awaiting verification by the admin."
 """
 
 import logging
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.conf import settings
-from django.http import HttpResponseRedirect
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -41,38 +41,57 @@ class VerifyManagerEmailView(APIView):
     """
     GET /api/users/verify-email/?token=<token>
 
+    Called by the FRONTEND page (not by a direct email-link click).
+    The frontend page reads the token from its own URL, then calls this
+    endpoint with fetch/axios — exactly like login/signup already do —
+    and handles the redirect itself once it gets a response.
+
     - Validates the token
     - Sets is_email_verified=True on the manager
     - Notifies all admins
-    - Redirects to frontend /signup/verified
+    - Returns JSON (never an HttpResponseRedirect)
     """
     permission_classes = [AllowAny]
     authentication_classes = []
 
     def get(self, request):
         token = request.query_params.get("token", "").strip()
-        frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173")
 
         if not token:
-            return HttpResponseRedirect(f"{frontend_url}/signup/verification-failed?reason=missing_token")
+            return Response(
+                {"error": "Missing verification token.", "reason": "missing_token"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         cache_key = f"{EMAIL_TOKEN_PREFIX}:{token}"
         data = cache.get(cache_key)
 
         if not data:
             logger.warning(f"[EMAIL VERIFY] Invalid or expired token: {token[:12]}...")
-            return HttpResponseRedirect(f"{frontend_url}/signup/verification-failed?reason=expired")
+            return Response(
+                {"error": "This verification link is invalid or has expired.", "reason": "expired"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             manager = User.objects.get(id=data["user_id"], role=User.Role.MANAGER)
         except User.DoesNotExist:
             logger.error(f"[EMAIL VERIFY] User not found for token data: {data}")
-            return HttpResponseRedirect(f"{frontend_url}/signup/verification-failed?reason=not_found")
+            return Response(
+                {"error": "Account not found.", "reason": "not_found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
-        # Already verified — just redirect
+        # Already verified — idempotent success
         if manager.is_email_verified:
             logger.info(f"[EMAIL VERIFY] Already verified: {manager.email}")
-            return HttpResponseRedirect(f"{frontend_url}/signup/verified?already=true")
+            return Response(
+                {
+                    "message": "Account created! Awaiting verification by the admin.",
+                    "already_verified": True,
+                },
+                status=status.HTTP_200_OK,
+            )
 
         # Mark email as verified
         manager.is_email_verified = True
@@ -90,7 +109,13 @@ class VerifyManagerEmailView(APIView):
             logger.error(f"[EMAIL VERIFY] Failed to notify admin: {e}")
 
         logger.info(f"[EMAIL VERIFY] Email verified successfully for {manager.email}")
-        return HttpResponseRedirect(f"{frontend_url}/signup/verified")
+        return Response(
+            {
+                "message": "Account created! Awaiting verification by the admin.",
+                "already_verified": False,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class ResendVerificationEmailView(APIView):
