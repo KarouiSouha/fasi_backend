@@ -179,17 +179,9 @@ class ResendVerificationEmailView(APIView):
 # ---------------------------------------------------------------------------
 
 def _issue_and_send_verification(manager) -> None:
-    """
-    Creates a verification token in cache and sends the verification email.
-    Called right after account creation.
-    """
     token = generate_email_token()
     cache_key = f"{EMAIL_TOKEN_PREFIX}:{token}"
     cache.set(cache_key, {"user_id": str(manager.id)}, timeout=EMAIL_TOKEN_EXPIRY)
 
-    try:
-        from apps.authentication.services import EmailService
-        EmailService.send_email_verification(manager=manager, token=token)
-        logger.info(f"[EMAIL VERIFY] Verification email sent to {manager.email}")
-    except Exception as e:
-        logger.error(f"[EMAIL VERIFY] Failed to send verification email to {manager.email}: {e}")
+    from apps.authentication.services import EmailService
+    EmailService.send_email_verification(manager=manager, token=token)
