@@ -367,8 +367,8 @@ class EmailService:
         frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173").rstrip('/')
         verify_url = f"{frontend_url}/signup/verify-email?token={token}"
 
-        subject = "[WEEG] Please verify your email address"
-
+        subject = "Welcome to WEEG — Complete your registration"
+        
         text_content = (
             f"Hello {manager.first_name},\n\n"
             f"Thank you for creating your WEEG Manager account.\n\n"
@@ -417,10 +417,9 @@ class EmailService:
 
         msg = EmailMultiAlternatives(subject, text_content, settings.DEFAULT_FROM_EMAIL, [manager.email])
         msg.attach_alternative(html_content, "text/html")
+        msg.extra_headers = {'Reply-To': 'weeg@digitalia.ly'}
         msg.send(fail_silently=False)
         logger.info(f"[EMAIL VERIFY] Verification email sent to {manager.email}")
-
-
 
 class UserService:
     @staticmethod
