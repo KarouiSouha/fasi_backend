@@ -375,62 +375,40 @@ class EmailService:
             f"Please verify your email address by clicking the link below:\n"
             f"{verify_url}\n\n"
             f"This link expires in 24 hours.\n\n"
-            f"If you did not create this account, you can safely ignore this email.\n\n"
             f"Best regards,\nThe WEEG team"
         )
 
         html_content = f"""
         <!DOCTYPE html>
         <html>
-        <head><meta charset="UTF-8"></head>
         <body style="font-family:Arial,sans-serif;background:#f4f4f4;margin:0;padding:20px;">
-          <div style="max-width:600px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
-            <div style="background:linear-gradient(135deg,#4f46e5,#7c3aed);padding:32px 40px;text-align:center;">
-              <div style="display:inline-block;background:rgba(255,255,255,0.15);border-radius:12px;padding:12px 20px;margin-bottom:16px;">
-                <span style="color:#fff;font-size:28px;font-weight:900;letter-spacing:2px;">WEEG</span>
-              </div>
-              <div style="width:56px;height:56px;background:rgba(255,255,255,0.2);border-radius:50%;margin:0 auto 12px;line-height:56px;text-align:center;">
-                <span style="font-size:26px;">✉️</span>
-              </div>
-              <h1 style="color:#fff;margin:0;font-size:22px;font-weight:600;">Verify your email address</h1>
+          <div style="max-width:600px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+            <div style="background:linear-gradient(135deg,#4f46e5,#7c3aed);padding:30px;text-align:center;">
+              <h1 style="color:#fff;margin:0;font-size:28px;font-weight:bold;">WEEG</h1>
             </div>
-            <div style="padding:40px;">
-              <p style="color:#374151;font-size:16px;margin:0 0 8px;">Hello <strong>{manager.first_name}</strong>,</p>
-              <p style="color:#6b7280;font-size:15px;margin:0 0 28px;line-height:1.6;">
-                Thank you for registering on <strong>WEEG</strong>.<br>
-                To complete your registration, please verify your email address by clicking the button below.
+            <div style="padding:30px;">
+              <h2 style="color:#1e293b;">Verify your email address</h2>
+              <p style="color:#475569;">Hello <strong>{manager.first_name}</strong>,</p>
+              <p style="color:#475569;">
+                Thank you for registering on WEEG.<br>
+                Please verify your email address by clicking the button below.
               </p>
-              <div style="text-align:center;margin:32px 0;">
+              <div style="text-align:center;margin:30px 0;">
                 <a href="{verify_url}"
-                  style="display:inline-block;background:linear-gradient(135deg,#4f46e5,#7c3aed);
-                          color:#fff;font-size:16px;font-weight:700;
-                          padding:16px 40px;border-radius:10px;text-decoration:none;">
-                  ✉️ Verify my email address
+                  style="display:inline-block;background:linear-gradient(135deg,#4f46e5,#7c3aed);color:#fff;
+                          text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:bold;font-size:16px;">
+                  Verify my email address
                 </a>
               </div>
-              <div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;padding:12px 16px;margin:24px 0;text-align:center;">
-                <p style="color:#92400e;margin:0;font-size:13px;">
-                  ⏰ This link expires in <strong>24 hours</strong>.
-                </p>
+              <div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;padding:12px;margin:16px 0;text-align:center;">
+                <p style="color:#92400e;margin:0;">This link expires in <strong>24 hours</strong>.</p>
               </div>
-              <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:20px 24px;margin-bottom:24px;">
-                <p style="color:#0369a1;font-size:14px;font-weight:600;margin:0 0 12px;">What happens next?</p>
-                <table style="width:100%;border-collapse:collapse;">
-                  <tr><td style="padding:5px 0;color:#0369a1;font-size:13px;">1. Click the button above to verify your email</td></tr>
-                  <tr><td style="padding:5px 0;color:#0369a1;font-size:13px;">2. An administrator will review your account request</td></tr>
-                  <tr><td style="padding:5px 0;color:#0369a1;font-size:13px;">3. You will receive a confirmation email once approved</td></tr>
-                </table>
-              </div>
-              <p style="color:#9ca3af;font-size:12px;text-align:center;margin:0;">
-                If you did not create this account, please ignore this email.<br>
-                You can also copy this link: <a href="{verify_url}" style="color:#4f46e5;">{verify_url}</a>
+              <p style="color:#94a3b8;font-size:13px;">
+                If you did not create this account, please ignore this email.
               </p>
             </div>
-            <div style="background:#f9fafb;border-top:1px solid #e5e7eb;padding:20px 40px;text-align:center;">
-              <p style="color:#9ca3af;font-size:12px;margin:0;">
-                WEEG — Financial Analytics & System Intelligence<br>
-                This is an automated email, please do not reply.
-              </p>
+            <div style="background:#f8fafc;padding:20px;text-align:center;border-top:1px solid #e2e8f0;">
+              <p style="color:#94a3b8;font-size:12px;margin:0;">Automatic WEEG email — Do not reply.</p>
             </div>
           </div>
         </body>
@@ -441,6 +419,9 @@ class EmailService:
         msg.attach_alternative(html_content, "text/html")
         msg.send(fail_silently=False)
         logger.info(f"[EMAIL VERIFY] Verification email sent to {manager.email}")
+
+
+
 class UserService:
     @staticmethod
     def approve_manager(manager: User, admin: User) -> None:

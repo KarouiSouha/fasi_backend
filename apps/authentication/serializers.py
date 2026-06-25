@@ -4,6 +4,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
 from apps.companies.models import Company
+from .email_verification import EmailVerificationService
 
 User = get_user_model()
 
@@ -118,10 +119,10 @@ class UserListSerializer(serializers.ModelSerializer):
             "status",
             "company",
             "company_name",
-            "company_industry",     # ← NEW
-            "company_country",      # ← NEW
-            "company_city",         # ← NEW
-            "company_current_erp", 
+            "company_industry",
+            "company_country",
+            "company_city",
+            "company_current_erp",
             "created_at",
             "permissions_list",
         ]
@@ -221,11 +222,16 @@ class ManagerSignupSerializer(serializers.ModelSerializer):
 
     def validate_email(self, value):
         email = value.strip().lower()
-        
+
         # Check if email already exists in database
         if User.objects.filter(email=email).exists():
             raise serializers.ValidationError("This email address is already in use.")
-        
+
+        # Verify the email actually exists (Abstract API)
+        is_valid, error_message = EmailVerificationService.validate_email_for_signup(email)
+        if not is_valid:
+            raise serializers.ValidationError(error_message)
+
         return email
 
     def validate_company_name(self, value):
@@ -313,8 +319,8 @@ class ManagerSignupSerializer(serializers.ModelSerializer):
         user.set_password(password)
         user.save()
         return user
-    
-    
+
+
 # =============================================================================
 # AGENT CREATION BY MANAGER
 # =============================================================================
@@ -344,8 +350,15 @@ class CreateAgentSerializer(serializers.ModelSerializer):
 
     def validate_email(self, value):
         email = value.strip().lower()
+
         if User.objects.filter(email=email).exists():
             raise serializers.ValidationError("This email address is already in use.")
+
+        # Verify the email actually exists (Abstract API)
+        is_valid, error_message = EmailVerificationService.validate_email_for_signup(email)
+        if not is_valid:
+            raise serializers.ValidationError(error_message)
+
         return email
 
     def validate_permissions_list(self, value):
@@ -450,11 +463,11 @@ class UpdateUserPermissionsSerializer(serializers.ModelSerializer):
             "view-profile",
             "ai-insights",
         }
-        
+
         # Pour les agents, exclure les permissions liées à la gestion des équipes
         if self.instance and self.instance.role == User.Role.AGENT:
             allowed_permissions.discard("view-team")
-        
+
         invalid = set(value) - allowed_permissions
         if invalid:
             raise serializers.ValidationError(

@@ -67,7 +67,7 @@ class CreditKPIView(APIView):
 
         snapshot_id_param = request.query_params.get("snapshot_id", "").strip()
         report_date_param = request.query_params.get("report_date", "").strip()
-        aging_year_param = request.query_params.get("aging_year", "").strip()
+        aging_year_param  = request.query_params.get("aging_year", "").strip()
 
         latest_snap = None
         if snapshot_id_param:
@@ -111,13 +111,14 @@ class CreditKPIView(APIView):
         )
 
         # ── 1. Taux de clients à crédit ──────────────────────────────────────
-        # = (Customers with aging balance > 0) / (Total active customers) × 100
-        total_customers = aging_qs.count() 
-        credit_customers_count = aging_qs.filter(total__gt=0).count() 
-
-        credit_customers_count = credit_aging_qs.filter(
-            total__gt=0
-        ).values("account_code").distinct().count()
+        total_customers = aging_qs.count()
+        credit_customers_count = (
+            credit_aging_qs
+            .filter(total__gt=0)
+            .values("account_code")
+            .distinct()
+            .count()
+        )
 
         taux_clients_credit = (
             round((credit_customers_count / total_customers) * 100, 2)
@@ -125,18 +126,11 @@ class CreditKPIView(APIView):
         )
 
         # ── 2. Taux de crédit total ───────────────────────────────────────────
-        # = (CA à crédit / CA total) × 100
-        # CA total = SUM(total_out) for all sales
-        # CA à crédit = SUM(total_out) for sales to named, non-cash customers
         SALE_LABELS = ["ف بيع"]
-
-        sales_qs = MaterialMovement.objects.filter(
-            company=company,
-            movement_type__in=SALE_LABELS,
+        CASH_KEYWORDS_FILTER = (
+            Q(customer_name__icontains="نقدي") |
+            Q(customer_name__icontains="قطاعي")
         )
-
-        SALE_LABELS = ["ف بيع"]
-        CASH_KEYWORDS_FILTER = Q(customer_name__icontains="نقدي") | Q(customer_name__icontains="قطاعي")
 
         sales_qs = MaterialMovement.objects.filter(
             company=company,
@@ -152,37 +146,39 @@ class CreditKPIView(APIView):
         ca_credit = float(ca_credit_agg["ca"])
 
         # ── 3. Taux d'impayés ─────────────────────────────────────────────────
-        # = (Montant impayé / Montant total à recouvrer) × 100
-        # Impayé = everything overdue (d61_90 and beyond)
         aging_totals = aging_qs.aggregate(
-            grand_total=Coalesce(Sum("total"), Decimal("0")),
-            sum_current=Coalesce(Sum("current"), Decimal("0")),
-            sum_d1_30=Coalesce(Sum("d1_30"), Decimal("0")),
-            sum_d31_60=Coalesce(Sum("d31_60"), Decimal("0")),
-            sum_d61_90=Coalesce(Sum("d61_90"), Decimal("0")),
-            sum_d91_120=Coalesce(Sum("d91_120"), Decimal("0")),
-            sum_d121_150=Coalesce(Sum("d121_150"), Decimal("0")),
-            sum_d151_180=Coalesce(Sum("d151_180"), Decimal("0")),
-            sum_d181_210=Coalesce(Sum("d181_210"), Decimal("0")),
-            sum_d211_240=Coalesce(Sum("d211_240"), Decimal("0")),
-            sum_d241_270=Coalesce(Sum("d241_270"), Decimal("0")),
-            sum_d271_300=Coalesce(Sum("d271_300"), Decimal("0")),
-            sum_d301_330=Coalesce(Sum("d301_330"), Decimal("0")),
-            sum_over_330=Coalesce(Sum("over_330"), Decimal("0")),
+            grand_total=Coalesce(Sum("total"),      Decimal("0")),
+            sum_current=Coalesce(Sum("current"),    Decimal("0")),
+            sum_d1_30=  Coalesce(Sum("d1_30"),      Decimal("0")),
+            sum_d31_60= Coalesce(Sum("d31_60"),     Decimal("0")),
+            sum_d61_90= Coalesce(Sum("d61_90"),     Decimal("0")),
+            sum_d91_120=Coalesce(Sum("d91_120"),    Decimal("0")),
+            sum_d121_150=Coalesce(Sum("d121_150"),  Decimal("0")),
+            sum_d151_180=Coalesce(Sum("d151_180"),  Decimal("0")),
+            sum_d181_210=Coalesce(Sum("d181_210"),  Decimal("0")),
+            sum_d211_240=Coalesce(Sum("d211_240"),  Decimal("0")),
+            sum_d241_270=Coalesce(Sum("d241_270"),  Decimal("0")),
+            sum_d271_300=Coalesce(Sum("d271_300"),  Decimal("0")),
+            sum_d301_330=Coalesce(Sum("d301_330"),  Decimal("0")),
+            sum_over_330=Coalesce(Sum("over_330"),  Decimal("0")),
         )
 
         grand_total = float(aging_totals["grand_total"])
+
         credit_realized = ca_total - grand_total
-        if ca_total > 0:
-         taux_credit_total = (credit_realized / ca_total) * 100
-        else:
-          taux_credit_total = 0.0
-        # Overdue = d61_90 and beyond (past 60 days is truly overdue)
-        overdue = sum(float(aging_totals[f"sum_{b}"]) for b in [
-            "d61_90", "d91_120", "d121_150", "d151_180",
-            "d181_210", "d211_240", "d241_270", "d271_300",
-            "d301_330", "over_330"
-        ])
+        taux_credit_total = (
+            round((credit_realized / ca_total) * 100, 2)
+            if ca_total > 0 else 0.0
+        )
+
+        overdue = sum(
+            float(aging_totals[f"sum_{b}"])
+            for b in [
+                "d61_90", "d91_120", "d121_150", "d151_180",
+                "d181_210", "d211_240", "d241_270", "d271_300",
+                "d301_330", "over_330",
+            ]
+        )
 
         taux_impayes = (
             round((overdue / grand_total) * 100, 2)
@@ -190,8 +186,6 @@ class CreditKPIView(APIView):
         )
 
         # ── 4. Délai moyen de paiement (DMP) ──────────────────────────────────
-        # DMP = Σ(bucket_midpoint × bucket_amount) / total_credit_amount
-        # Uses weighted average of aging bucket midpoints
         bucket_values = {
             "current":   float(aging_totals["sum_current"]),
             "d1_30":     float(aging_totals["sum_d1_30"]),
@@ -216,28 +210,22 @@ class CreditKPIView(APIView):
         dmp = round(weighted_sum / grand_total, 1) if grand_total > 0 else 0.0
 
         # ── 5. Taux de recouvrement ───────────────────────────────────────────
-        # = (Montant récupéré / Montant total à recouvrer) × 100
-        # Montant récupéré = CA crédit - Aging total (what's still owed)
-        # Represents portion of credit sales already paid
-        montant_recupere = max(0.0, ca_credit - grand_total)
-        taux_recouvrement = (
-            round((montant_recupere / ca_credit) * 100, 2)
-            if ca_credit > 0 else 0.0
-        )
         base_recouvrement = ca_total - grand_total
-        montant_recupere = max(0.0, ca_credit - grand_total)
+        montant_recupere  = max(0.0, ca_credit - grand_total)
         taux_recouvrement = (
-        round((montant_recupere / base_recouvrement) * 100, 2)
-        if base_recouvrement > 0 else 0.0
-      )
+            round((montant_recupere / base_recouvrement) * 100, 2)
+            if base_recouvrement > 0 else 0.0
+        )
+
         # ── Top 5 risky customers ─────────────────────────────────────────────
+        # ✅ FIX: was credit_aging_qs.filter(0) — invalid, caused the 500 error
         all_credit_records = list(
-            credit_aging_qs.filter(0)
+            credit_aging_qs
+            .filter(total__gt=0)          # only customers who actually owe money
             .select_related("customer")
             .order_by("-total")
         )
 
-        # Sort by risk: critical > high > medium > low, then by overdue_total
         risk_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
         all_credit_records.sort(
             key=lambda r: (risk_order.get(r.risk_score, 4), -float(r.total))
@@ -246,31 +234,33 @@ class CreditKPIView(APIView):
 
         top5_data = [
             {
-                "id": str(r.id),
-                "account": r.account,
-                "account_code": r.account_code,
+                "id":            str(r.id),
+                "account":       r.account,
+                "account_code":  r.account_code,
                 "customer_name": r.customer.name if r.customer else _extract_name(r.account),
-                "total": float(r.total),
-                "current": float(r.current),
+                "total":         float(r.total),
+                "current":       float(r.current),
                 "overdue_total": float(r.overdue_total),
-                "risk_score": r.risk_score,
-                "overdue_percentage": round((float(r.overdue_total) / float(r.total)) * 100, 1)
-                    if float(r.total) > 0 else 0.0,
+                "risk_score":    r.risk_score,
+                "overdue_percentage": (
+                    round((float(r.overdue_total) / float(r.total)) * 100, 1)
+                    if float(r.total) > 0 else 0.0
+                ),
                 "dmp_days": _calc_record_dmp(r),
                 "buckets": {
-                    "current":    float(r.current),
-                    "d1_30":      float(r.d1_30),
-                    "d31_60":     float(r.d31_60),
-                    "d61_90":     float(r.d61_90),
-                    "d91_120":    float(r.d91_120),
-                    "d121_150":   float(r.d121_150),
-                    "d151_180":   float(r.d151_180),
-                    "d181_210":   float(r.d181_210),
-                    "d211_240":   float(r.d211_240),
-                    "d241_270":   float(r.d241_270),
-                    "d271_300":   float(r.d271_300),
-                    "d301_330":   float(r.d301_330),
-                    "over_330":   float(r.over_330),
+                    "current":   float(r.current),
+                    "d1_30":     float(r.d1_30),
+                    "d31_60":    float(r.d31_60),
+                    "d61_90":    float(r.d61_90),
+                    "d91_120":   float(r.d91_120),
+                    "d121_150":  float(r.d121_150),
+                    "d151_180":  float(r.d151_180),
+                    "d181_210":  float(r.d181_210),
+                    "d211_240":  float(r.d211_240),
+                    "d241_270":  float(r.d241_270),
+                    "d271_300":  float(r.d271_300),
+                    "d301_330":  float(r.d301_330),
+                    "over_330":  float(r.over_330),
                 },
             }
             for r in top5
@@ -279,11 +269,13 @@ class CreditKPIView(APIView):
         # ── Aging distribution by bucket (for chart) ─────────────────────────
         bucket_distribution = [
             {
-                "bucket": bucket,
-                "label": label,
-                "amount": bucket_values.get(bucket, 0.0),
-                "percentage": round(bucket_values.get(bucket, 0.0) / grand_total * 100, 1)
-                    if grand_total > 0 else 0.0,
+                "bucket":       bucket,
+                "label":        label,
+                "amount":       bucket_values.get(bucket, 0.0),
+                "percentage":   (
+                    round(bucket_values.get(bucket, 0.0) / grand_total * 100, 1)
+                    if grand_total > 0 else 0.0
+                ),
                 "midpoint_days": BUCKET_MIDPOINTS[bucket],
             }
             for bucket, label in [
@@ -307,53 +299,53 @@ class CreditKPIView(APIView):
             "report_date": None,
             "kpis": {
                 "taux_clients_credit": {
-                    "value": taux_clients_credit,
-                    "numerator": credit_customers_count,
+                    "value":       taux_clients_credit,
+                    "numerator":   credit_customers_count,
                     "denominator": total_customers,
-                    "label": "Credit Customer Rate",
-                    "unit": "%",
+                    "label":       "Credit Customer Rate",
+                    "unit":        "%",
                     "description": "Share of customers with an active credit balance",
                 },
                 "taux_credit_total": {
-                    "value": taux_credit_total,
+                    "value":     taux_credit_total,
                     "ca_credit": round(ca_credit, 2),
-                    "ca_total": round(ca_total, 2),
-                    "label": "Total Credit Rate",
-                    "unit": "%",
+                    "ca_total":  round(ca_total, 2),
+                    "label":     "Total Credit Rate",
+                    "unit":      "%",
                     "description": "Share of revenue realized on credit terms",
                 },
                 "taux_impayes": {
-                    "value": taux_impayes,
-                    "overdue_amount": round(overdue, 2),
-                    "total_receivables": round(grand_total, 2),
-                    "label": "Overdue Rate",
-                    "unit": "%",
+                    "value":              taux_impayes,
+                    "overdue_amount":     round(overdue, 2),
+                    "total_receivables":  round(grand_total, 2),
+                    "label":              "Overdue Rate",
+                    "unit":              "%",
                     "description": "Overdue receivables as a percentage of total receivables",
                 },
                 "dmp": {
-                    "value": dmp,
-                    "label": "DSO (Avg. Payment Days)",
-                    "unit": "days",
+                    "value":       dmp,
+                    "label":       "DSO (Avg. Payment Days)",
+                    "unit":        "days",
                     "description": "Average number of days customers take to pay",
                 },
                 "taux_recouvrement": {
-                    "value": taux_recouvrement,
+                    "value":            taux_recouvrement,
                     "recovered_amount": round(montant_recupere, 2),
-                    "total_credit": round(ca_total - grand_total, 2),
-                    "label": "Collection Rate",
-                    "unit": "%",
+                    "total_credit":     round(ca_total - grand_total, 2),
+                    "label":            "Collection Rate",
+                    "unit":             "%",
                     "description": "Percentage of credit sales successfully collected",
                 },
             },
             "top5_risky_customers": top5_data,
-            "bucket_distribution": bucket_distribution,
+            "bucket_distribution":  bucket_distribution,
             "summary": {
-                "total_customers": total_customers,
-                "credit_customers": credit_customers_count,
+                "total_customers":        total_customers,
+                "credit_customers":       credit_customers_count,
                 "grand_total_receivables": round(grand_total, 2),
-                "overdue_amount": round(overdue, 2),
-                "ca_credit": round(ca_credit, 2),
-                "ca_total": round(ca_total, 2),
+                "overdue_amount":         round(overdue, 2),
+                "ca_credit":              round(ca_credit, 2),
+                "ca_total":               round(ca_total, 2),
             },
         })
 
@@ -372,19 +364,19 @@ def _calc_record_dmp(record) -> float:
     if total <= 0:
         return 0.0
     buckets = {
-        "current":  float(record.current),
-        "d1_30":    float(record.d1_30),
-        "d31_60":   float(record.d31_60),
-        "d61_90":   float(record.d61_90),
-        "d91_120":  float(record.d91_120),
-        "d121_150": float(record.d121_150),
-        "d151_180": float(record.d151_180),
-        "d181_210": float(record.d181_210),
-        "d211_240": float(record.d211_240),
-        "d241_270": float(record.d241_270),
-        "d271_300": float(record.d271_300),
-        "d301_330": float(record.d301_330),
-        "over_330": float(record.over_330),
+        "current":   float(record.current),
+        "d1_30":     float(record.d1_30),
+        "d31_60":    float(record.d31_60),
+        "d61_90":    float(record.d61_90),
+        "d91_120":   float(record.d91_120),
+        "d121_150":  float(record.d121_150),
+        "d151_180":  float(record.d151_180),
+        "d181_210":  float(record.d181_210),
+        "d211_240":  float(record.d211_240),
+        "d241_270":  float(record.d241_270),
+        "d271_300":  float(record.d271_300),
+        "d301_330":  float(record.d301_330),
+        "over_330":  float(record.over_330),
     }
     weighted = sum(BUCKET_MIDPOINTS[b] * v for b, v in buckets.items())
     return round(weighted / total, 1)

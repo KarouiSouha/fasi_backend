@@ -60,7 +60,7 @@ class EmailVerificationService:
                 data = response.json()
             except ValueError:
                 data = {}
-            
+            logger.info(f"[EMAIL VERIFY DEBUG] email={email} status_code={response.status_code} data={data}")
             if response.status_code != 200:
                 message = data.get("error", {}).get("message") if isinstance(data.get("error"), dict) else data.get("error")
                 reason = message or f"Abstract API returned HTTP {response.status_code}"

@@ -184,4 +184,6 @@ def _issue_and_send_verification(manager) -> None:
     cache.set(cache_key, {"user_id": str(manager.id)}, timeout=EMAIL_TOKEN_EXPIRY)
 
     from apps.authentication.services import EmailService
+    print(f"[DEBUG] Sending verification email to {manager.email}", flush=True)
     EmailService.send_email_verification(manager=manager, token=token)
+    print(f"[DEBUG] Email sent successfully to {manager.email}", flush=True)
