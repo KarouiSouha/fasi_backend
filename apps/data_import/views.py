@@ -293,7 +293,7 @@ class ExcelUploadView(APIView):
                     },
                 },
                 status=status.HTTP_201_CREATED,
-            )()
+            )
 
         except ValueError as e:
             log.status = ImportLog.ImportStatus.FAILED
